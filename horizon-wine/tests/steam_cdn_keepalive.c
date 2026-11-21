@@ -13,12 +13,13 @@ int steam_backend_cdn_auth(struct steam_backend *b,uint32_t app,uint32_t depot,c
     (void)b;(void)app;(void)depot;(void)host;(void)token;assert(!"Unexpected CDN authorization request");return 0;
 }
 int main(int argc,char **argv){
-    char hosts[8][128]={{0}};unsigned char data[65536];
+    struct steam_cdn_server hosts[8]={0};unsigned char data[65536];
     struct steam_download_view view={0};struct cdn_session cdn={0};
     struct steam_install_callbacks cb={0};
     struct transfer t={.cdn=&cdn,.cb=&cb,.view=&view,.memory=data,.capacity=sizeof(data)};
     unsigned int i;assert(argc==2&&getenv("STEAM_TEST_CA"));
-    assert(snprintf(hosts[0],sizeof(hosts[0]),"localhost:%s",argv[1])<(int)sizeof(hosts[0]));
+    assert(snprintf(hosts[0].host,sizeof(hosts[0].host),"localhost:%s",argv[1])<(int)sizeof(hosts[0].host));
+    strcpy(hosts[0].vhost, hosts[0].host);
     assert(!curl_global_init(CURL_GLOBAL_DEFAULT));
     cdn.started=cdn.rate_tick=millis();
     for(i=0;i<8;++i){assert(fetch(hosts,1,"fixture",&t)&&t.used==sizeof(data));assert(data[0]=='x'&&data[65535]=='x');}

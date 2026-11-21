@@ -472,16 +472,8 @@ static int fetch(const struct steam_cdn_server hosts[8], size_t count, const cha
 #undef RETURN
 }
 
-static int fetch_manifest(struct steam_cdn_server hosts[8], size_t *count,
-                          const char *resource, struct transfer *t) {
-  if (fetch(hosts, *count, resource, t)) return 1;
-  if ((t->view->error != INSTALL_CDN && t->view->error != 1009) ||
-      t->cdn->alternate_directory_tried) return 0;
-  if (!tick(t->cb)) {
-    t->view->error = INSTALL_CANCELLED;
-    return 0;
-  }
-
+static int alternate_hosts(struct steam_cdn_server hosts[8], size_t *count,
+                           struct transfer *t, const char *phase) {
   /* The local directory can contain only regional mirrors. Ask the same
    * authenticated Steam service for another cell after exhausting them.
    * Cell 1 is a Valve cache region; 0 requests automatic selection. */
@@ -492,8 +484,8 @@ static int fetch_manifest(struct steam_cdn_server hosts[8], size_t *count,
   unsigned int old_tls = b->tls_hosts, old_plain = b->plain_hosts;
   t->cdn->alternate_directory_tried = 1;
   if (!steam_backend_servers(b, cell, alternate, &returned)) {
-    network_diag("stage=steam.manifest.fallback appid=%u depot=%u cell=%u result=directory_failed error=%u",
-                 t->app, t->depot, cell, b->error);
+    network_diag("stage=steam.%s.fallback appid=%u depot=%u cell=%u result=directory_failed error=%u",
+                 phase, t->app, t->depot, cell, b->error);
     return 0;
   }
   for (size_t i = 0; i < returned; ++i) {
@@ -506,8 +498,8 @@ static int fetch_manifest(struct steam_cdn_server hosts[8], size_t *count,
       if (!strcmp(alternate[i].vhost, alternate[j].vhost)) break;
     if (j == kept) alternate[kept++] = alternate[i];
   }
-  network_diag("stage=steam.manifest.fallback appid=%u depot=%u from_cell=%u cell=%u result=%s hosts=%zu",
-               t->app, t->depot, b->cell_id, cell, kept ? "retry" : "no_new_https_hosts", kept);
+  network_diag("stage=steam.%s.fallback appid=%u depot=%u from_cell=%u cell=%u result=%s hosts=%zu",
+               phase, t->app, t->depot, b->cell_id, cell, kept ? "retry" : "no_new_https_hosts", kept);
   if (!kept) {
     b->tls_hosts = old_tls;
     b->plain_hosts = old_plain;
@@ -520,8 +512,21 @@ static int fetch_manifest(struct steam_cdn_server hosts[8], size_t *count,
   steam_secret_clear(t->cdn->tokens, sizeof(t->cdn->tokens));
   memset(t->cdn->token_generation, 0, sizeof(t->cdn->token_generation));
   t->cdn->preferred = 0;
+  return 1;
+}
+
+static int fetch_manifest(struct steam_cdn_server hosts[8], size_t *count,
+                          const char *resource, struct transfer *t) {
+  if (fetch(hosts, *count, resource, t)) return 1;
+  if ((t->view->error != INSTALL_CDN && t->view->error != 1009) ||
+      t->cdn->alternate_directory_tried) return 0;
+  if (!tick(t->cb)) {
+    t->view->error = INSTALL_CANCELLED;
+    return 0;
+  }
+  if (!alternate_hosts(hosts, count, t, "manifest")) return 0;
   t->view->error = 0;
-  return fetch(hosts, kept, resource, t);
+  return fetch(hosts, *count, resource, t);
 }
 static int unzip(const char *archive, const char *output,
                  const struct steam_install_callbacks *cb) {
@@ -765,7 +770,7 @@ struct request {
 struct depot_run {
   struct transfer *t;
   struct steam_engine *engine;
-  const struct steam_cdn_server *hosts;
+  struct steam_cdn_server *hosts;
   size_t host_count;
   const char *stage;
   const unsigned char *key;
@@ -784,6 +789,9 @@ struct depot_run {
   struct request requests[STEAM_CDN_MAX_REQUESTS];
   unsigned int concurrency, active;
   uint64_t in_flight, bad_until[8], *reused;
+  unsigned int failed_hosts, handshake_failures;
+  uint64_t handshake_window;
+  int log_next_chunk;
   char parent[1024];
   char **exe;
   size_t *exe_count;
@@ -1049,17 +1057,15 @@ static int run_next(struct depot_run *r, struct work *out) {
 static size_t run_host(struct depot_run *r, unsigned int slot, size_t avoid) {
   size_t spread = r->host_count < 4 ? r->host_count : 4, i, host;
   uint64_t now = millis();
+  size_t first = avoid ? r->t->cdn->preferred : slot % spread;
   for (i = 0; i < r->host_count; ++i) {
-    host = (slot % spread + i) % r->host_count;
+    host = (first + i) % r->host_count;
     if (r->bad_until[host] <= now && host + 1 != avoid)
       return host;
   }
-  for (i = 0; i < r->host_count; ++i) {
-    host = (slot % spread + i) % r->host_count;
-    if (host + 1 != avoid)
-      return host;
-  }
-  return slot % spread;
+  if (avoid && avoid <= r->host_count && r->bad_until[avoid - 1] <= now)
+    return avoid - 1;
+  return r->host_count;
 }
 static int run_start(struct depot_run *r, unsigned int slot) {
   struct request *q = &r->requests[slot];
@@ -1107,6 +1113,13 @@ static int run_result(struct depot_run *r,
     q->buffer = NULL;
     if (result->bytes == q->work.chunk.compressed) {
       t->cdn->preferred = q->host;
+      r->bad_until[q->host] = 0;
+      r->failed_hosts &= ~(1u << q->host);
+      if (r->log_next_chunk) {
+        network_diag("stage=steam.chunk.recovery appid=%u depot=%u host=%s result=received bytes=%zu",
+                     t->app, t->depot, r->hosts[q->host].vhost, result->bytes);
+        r->log_next_chunk = 0;
+      }
       if (!steam_engine_submit(r->engine, q->work.file, &q->work.chunk, buffer,
                                q->work.integrity |
                                    (unsigned int)(q->host + 1) << 8)) {
@@ -1148,7 +1161,24 @@ static int run_result(struct depot_run *r,
   }
   free(q->buffer);
   q->buffer = NULL;
+  if (now >= r->bad_until[q->host])
+    network_diag("stage=steam.chunk.cdn appid=%u depot=%u host=%s http=%u curl=%u result=cooldown",
+                 t->app, t->depot, r->hosts[q->host].vhost, result->http, result->transport);
   r->bad_until[q->host] = now + 15000;
+  r->failed_hosts |= 1u << q->host;
+  /* Several handshakes failing in a burst: give the remaining TLS
+   * connections room to finish, including requests already in flight. */
+  if (result->transport == CURLE_SSL_CONNECT_ERROR && r->concurrency > 4) {
+    if (!r->handshake_failures || now - r->handshake_window > 5000) {
+      r->handshake_window = now;
+      r->handshake_failures = 0;
+    }
+    if (++r->handshake_failures == 4) {
+      network_diag("stage=steam.chunk.parallelism appid=%u depot=%u reason=tls_handshakes from=%u to=4",
+                   t->app, t->depot, r->concurrency);
+      v->parallelism = r->concurrency = 4;
+    }
+  }
   q->work.avoid = q->host + 1;
   q->work.network += result->http == 401 || result->http == 403 ? 3 : 1;
   if (q->work.network >= NETWORK_ATTEMPTS) {
@@ -1177,6 +1207,7 @@ static int run_depot(struct depot_run *r) {
     memset(t->cdn->token_generation, 0, sizeof(t->cdn->token_generation));
     t->cdn->depot = t->depot;
   }
+  v->parallelism = r->concurrency;
   r->base = *v;
   steam_cdn_metrics(t->cdn->pool, &r->before);
   for (;;) {
@@ -1219,11 +1250,28 @@ static int run_depot(struct depot_run *r) {
       ok = 1;
       goto done;
     }
-    for (i = 0; i < r->concurrency; ++i)
+    /* Drain old slots before replacing host indices and their scoped grants.
+     * Cached manifests can bring us here without having tested any mirror. */
+    int change_directory = !t->cdn->alternate_directory_tried &&
+                           r->failed_hosts == (1u << r->host_count) - 1;
+    if (change_directory && !r->active &&
+        alternate_hosts(r->hosts, &r->host_count, t, "chunk")) {
+      r->failed_hosts = 0;
+      memset(r->bad_until, 0, sizeof(r->bad_until));
+      for (size_t j = 0; j < r->retry_count; ++j) {
+        r->retries[j].avoid = 0;
+        r->retries[j].network = 0;
+        r->retries[j].not_before = 0;
+      }
+      r->log_next_chunk = 1;
+    }
+    for (i = 0; !change_directory && i < r->concurrency && r->active < r->concurrency; ++i)
       if (!r->requests[i].active) {
         struct request *q = &r->requests[i];
         int got;
         if (e.queued_bytes + r->in_flight >= DOWNLOAD_MEMORY)
+          break;
+        if (run_host(r, i, 0) == r->host_count)
           break;
         got = run_next(r, &q->work);
         if (got < 0)
@@ -1673,6 +1721,7 @@ int steam_install_run(struct steam_backend *backend, const char *root,
     /* Every file of a depot is verified before the next depot starts: a later
      * depot may replace a file of an earlier one. */
     finished = run_depot(run);
+    hosts_count = run->host_count;
     free(run);
     if (!finished)
       goto done;

@@ -155,6 +155,7 @@ int steam_backend_depot(struct steam_backend *b, uint32_t app,
   *code = 1;
   return 1;
 }
+static int regional_chunk_fixture;
 int steam_backend_servers(struct steam_backend *b, uint32_t cell, struct steam_cdn_server hosts[8],
                           size_t *n) {
   if (cell != b->cell_id) {
@@ -171,6 +172,12 @@ int steam_backend_servers(struct steam_backend *b, uint32_t cell, struct steam_c
   strcpy(hosts[0].host, "fixture.steamcontent.com");
   strcpy(hosts[0].vhost, hosts[0].host);
   *n = 1;
+  if (regional_chunk_fixture) {
+    strcpy(hosts[1].host, "cert.example.com");
+    strcpy(hosts[1].vhost, hosts[1].host);
+    *n = 2;
+    b->tls_hosts = 3;
+  }
   return 1;
 }
 int steam_backend_cdn_auth(struct steam_backend *b, uint32_t app,

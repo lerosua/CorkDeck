@@ -11,6 +11,7 @@
 #define main serial_fixture_main
 #include "steam_install_host.c"
 #undef main
+static unsigned regional_failures, backup_chunks, handshake_errors;
 struct pool_request {
   char url[2048];
   unsigned char *buffer;
@@ -64,6 +65,25 @@ int fixture_pool_pump(struct steam_cdn *p, unsigned int wait) {
       r->result = (struct steam_cdn_result){
           .slot = i,
           .http = auth_required && !strstr(r->url, "fixture=test") ? 403 : 200};
+      if (handshake_errors) {
+        --handshake_errors;
+        r->result.http = 0;
+        r->result.transport = CURLE_SSL_CONNECT_ERROR;
+      }
+      if (regional_chunk_fixture) {
+        if (strstr(r->url, "fixture.steamcontent.com/")) {
+          r->result.http = 302;
+          ++regional_failures;
+        } else if (strstr(r->url, "cert.example.com/")) {
+          r->result.http = 0;
+          r->result.transport = CURLE_PEER_FAILED_VERIFICATION;
+          ++regional_failures;
+        } else {
+          assert(strstr(r->url, "https://two.example.com/") ||
+                 strstr(r->url, "https://backup.example.com/"));
+          ++backup_chunks;
+        }
+      }
       if (r->result.http == 200)
         for (chunk = 0; chunk < 2; ++chunk)
           if (strstr(r->url, hashtext[chunk])) {
@@ -164,6 +184,18 @@ static void small_installer_tests(void){
     }
     assert(!steam_storage_uninstall(root,123,NULL,NULL));
   }
+  /* A cached manifest bypasses manifest failover. Exhaust the two regional
+   * chunk hosts with parallel requests, then finish on the new HTTPS hosts. */
+  auth_required = 0;
+  regional_chunk_fixture = 1;
+  assert(steam_install_run(&b, root, 123, &cb) && result.state == STEAM_DOWNLOAD_COMPLETE);
+  assert(regional_failures == b.concurrency && backup_chunks == 40 && result.downloaded == 40*64);
+  assert(!steam_storage_uninstall(root,123,NULL,NULL));
+  regional_chunk_fixture = 0;
+  handshake_errors = 4;
+  assert(steam_install_run(&b, root, 123, &cb) && result.state == STEAM_DOWNLOAD_COMPLETE);
+  assert(!handshake_errors && result.peak_requests == 16 && result.parallelism == 4 && result.downloaded == 40*64);
+  assert(!steam_storage_uninstall(root,123,NULL,NULL));
   auth_required=0;requests=0;corrupt_responses=1;
   assert(steam_install_run(&b,root,123,&cb)&&result.integrity_retries==1&&result.downloaded==40*64&&requests>40&&requests<=48);
   assert(!steam_storage_uninstall(root,123,NULL,NULL));requests=0;short_responses=1;
