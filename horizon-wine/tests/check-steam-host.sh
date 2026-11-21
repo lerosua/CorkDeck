@@ -14,6 +14,10 @@ $cc $flags "$root/tests/steam_wire.c" "$root/source/steam/steam_wire.c" \
 "$build/wire"
 $cc $flags "$root/tests/steam_compat.c" "$root/source/steam/steam_compat.c" -o "$build/compat"
 "$build/compat"
+python3 "$root/tools/make-embed.py" "$build/seed.c" steam_community_seed "$root/../docs/compat/reports.tsv"
+$cc $flags "$root/tests/steam_community.c" "$build/seed.c" "$root/source/steam/steam_community.c" \
+    "$root/source/steam/steam_file.c" -o "$build/community"
+"$build/community"
 $cc $flags "$root/tests/steam_directory.c" "$root/source/steam/steam_directory.c" -o "$build/directory"
 "$build/directory"
 $cc $flags "$root/tests/steam_crypto.c" "$root/source/steam/steam_crypto.c" \
@@ -30,7 +34,7 @@ $cc $flags $(sdl2-config --cflags) "$root/tests/steam_cm_route_host.c" "$root/so
 $cc $flags $(sdl2-config --cflags) "$root/tests/steam_logon.c" \
     "$root/source/steam/steam_crypto.c" "$root/source/steam/steam_wire.c" \
     "$root/source/steam/steam_cm_message.c" "$root/source/steam/steam_auth.c" \
-    "$root/source/steam/steam_library.c" "$root/source/steam/steam_library_cache.c" \
+    "$root/source/steam/steam_library.c" "$root/source/steam/steam_library_cache.c" "$root/source/steam/steam_detail_cache.c" \
     "$root/source/steam/steam_family.c" "$root/source/steam/steam_settings.c" "$root/source/steam/steam_file.c" "$root/source/steam/steam_session.c" \
     $(sdl2-config --libs) -lmbedcrypto -lm -lz -o "$build/logon"
 "$build/logon"

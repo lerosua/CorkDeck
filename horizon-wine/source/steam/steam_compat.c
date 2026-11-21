@@ -4,22 +4,6 @@
 #include <stdlib.h>
 #include <strings.h>
 
-/* Title-level observations in docs/COMPATIBILITY.md. Keep editions separate. */
-const char *steam_compat_record(uint32_t app)
-{
-    switch (app) {
-    case 7940: return "0.2 reached the opening logos. Gameplay untested.";
-    case 22300: return "0.2 reached the launcher and main menu. Gameplay untested.";
-    case 329860: return "An earlier build reached the main menu. Gameplay untested.";
-    case 205100: return "0.2 reached the main menu at about 24 FPS. No gameplay measurement in that test.";
-    case 15100: return "0.3e reached the intro video. Menu and gameplay untested.";
-    case 17410: return "Startup blocked by the Steam client signature check.";
-    case 42700: return "Exits before the first frame. This edition needs Steam client executable generation.";
-    case 223850: return "Fails to start. Requires the Steam client and its system information service.";
-    default: return NULL;
-    }
-}
-
 static void plain_text(char *html)
 {
     char *out = html;
@@ -103,53 +87,83 @@ int steam_compat_parse_minimum(const char *json, size_t size, uint32_t app, stru
     return 1;
 }
 
-const char *steam_compat_deck_rating(unsigned int category)
-{
-    static const char *const ratings[] = {"Not rated", "Unsupported", "Playable", "Verified"};
-    return category < sizeof(ratings) / sizeof(ratings[0]) ? ratings[category] : "Unknown";
-}
-
-int steam_compat_parse_deck(const char *json, size_t size, uint32_t app, unsigned int *category)
-{
-    struct parser root = {(const unsigned char *)json, (const unsigned char *)json + size, 0};
-    struct parser result, field;
-    unsigned long long value;
-    if (!json_member(root, "success", &field) || !json_uint(&field, &value) || value != 1 ||
-        !json_member(root, "results", &result) || !json_member(result, "appid", &field) ||
-        !json_uint(&field, &value) || value != app || !json_member(result, "resolved_category", &field) ||
-        !json_uint(&field, &value) || value > 3) return 0;
-    *category = (unsigned int)value;
-    return 1;
-}
-
 static double megabytes(const char *text)
 {
     for (const char *p = text; *p;) {
         if (!isdigit((unsigned char)*p)) { ++p; continue; }
+        const char *start = p;
         char *end;
         double number = strtod(p, &end);
         p = end;
+        /* English store entries can group thousands, e.g. "4,096 MB". */
+        while (*p == ',' && isdigit((unsigned char)p[1]) && isdigit((unsigned char)p[2]) &&
+               isdigit((unsigned char)p[3]) && !isdigit((unsigned char)p[4])) {
+            number = number * 1000 + (p[1] - '0') * 100 + (p[2] - '0') * 10 + (p[3] - '0');
+            p += 4;
+        }
         while (isspace((unsigned char)*p)) ++p;
         if (!strncasecmp(p, "GB", 2) || !strncasecmp(p, "GiB", 3)) return number * 1024;
         if (!strncasecmp(p, "MB", 2) || !strncasecmp(p, "MiB", 3)) return number;
+        /* Some publishers write VRAM as "(512M)", including full-width brackets.
+         * A GPU model such as "960M" alone is not a memory capacity. */
+        if ((*p == 'M' || *p == 'm') && (p[1] == ')' || !strncmp(p + 1, "）", 3))) {
+            if ((start > text && start[-1] == '(') ||
+                (start - text >= 3 && !memcmp(start - 3, "（", 3))) return number;
+        }
     }
     return 0;
 }
 
-const char *steam_compat_estimate(const struct steam_minimum *minimum)
+/* Match named CPU families and explicit core requirements. GHz from an x86
+ * spec cannot be converted into Cortex-A57 performance under translation. */
+static int contains_any(const char *text, const char *const terms[], size_t count)
 {
-    double ram = megabytes(minimum->memory), vram = megabytes(minimum->graphics);
-    const char *version = minimum->directx + strcspn(minimum->directx, "0123456789");
-    long dx = strtol(version, NULL, 10);
-    if (ram >= 4096) return "High risk: the Windows RAM minimum leaves little room for Horizon and translation.";
-    if (dx >= 12) return "High risk: the Windows build requires DirectX 12 graphics translation.";
-    if (vram >= 2048) return "High risk: the listed graphics memory competes for shared Switch memory.";
-    if (ram > 0 && ram <= 2048 && dx >= 8 && dx <= 10 && vram > 0 && vram <= 512)
-        return "Worth testing: low RAM and graphics memory requirements, with an older DirectX version.";
-    if (ram > 0 && ram <= 2048 && (dx == 0 || dx <= 11) &&
-        strstr(minimum->graphics, "Intel") &&
-        (strstr(minimum->graphics, "HD 3000") || strstr(minimum->graphics, "HD 4000") ||
-         strstr(minimum->graphics, "HD Graphics 3000") || strstr(minimum->graphics, "HD Graphics 4000")))
-        return "Worth testing: low RAM requirements and an older integrated GPU are listed.";
-    return "Insufficient evidence to predict gameplay from these Windows requirements.";
+    for (size_t i = 0; i < count; ++i)
+        for (const char *p = text; *p; ++p)
+            if (!strncasecmp(p, terms[i], strlen(terms[i]))) return 1;
+    return 0;
+}
+#define MATCH(text, terms) contains_any(text, terms, sizeof(terms) / sizeof((terms)[0]))
+
+struct steam_assessment steam_compat_estimate(const struct steam_minimum *m)
+{
+    if (!m) return (struct steam_assessment){FIT_UNKNOWN, NULL};
+    static const char *const old_cpu[] = {"core 2 duo", "core2 duo", "pentium 4", "pentium iii",
+                                         "pentium d ", "athlon 64", "athlon ii x2"};
+    static const char *const heavy_cpu[] = {"6-core", "6 core", "six-core", "six core",
+                                          "8-core", "8 core", "eight-core", "eight core",
+                                          "ryzen 5", "ryzen 7", "ryzen 9", "core i9"};
+    static const char *const desktop_cpu[] = {"core i3", "core i5", "core i7", "i3-", "i5-", "i7-",
+                                              "ryzen", "quad core", "quad-core", "4 cores", "4-core"};
+    static const char *const old_igpu[] = {"HD 3000", "HD 4000", "HD Graphics 3000", "HD Graphics 4000"};
+    double ram = megabytes(m->memory), vram = megabytes(m->graphics);
+    long dx = strtol(m->directx + strcspn(m->directx, "0123456789"), NULL, 10);
+    if (ram >= 4096)
+        return (struct steam_assessment){FIT_HIGH_RISK, "The game's Windows RAM minimum reaches or exceeds the Switch's 4 GB of shared memory."};
+    if (dx >= 12)
+        return (struct steam_assessment){FIT_HIGH_RISK, "The Windows build requires DirectX 12 graphics translation."};
+    if (vram >= 2048 || (vram > 0 && ram + vram >= 4096))
+        return (struct steam_assessment){FIT_HIGH_RISK, "The GPU and game compete for the Switch's 4 GB of shared memory."};
+    int legacy = MATCH(m->processor, old_cpu);
+    if (!legacy && MATCH(m->processor, heavy_cpu))
+        return (struct steam_assessment){FIT_HIGH_RISK, "The listed desktop CPU is demanding for four Cortex-A57 cores translating x86 code."};
+    if (ram > 2048)
+        return (struct steam_assessment){FIT_TIGHT, "The RAM minimum leaves little room for graphics, Horizon and the translator."};
+    if (!legacy && MATCH(m->processor, desktop_cpu))
+        return (struct steam_assessment){FIT_TIGHT, "Translating this desktop CPU workload on Cortex-A57 may limit frame rate."};
+    int light_gpu = (vram > 0 && vram <= 512 && dx >= 8 && dx <= 10) ||
+                    (dx <= 11 && strstr(m->graphics, "Intel") && MATCH(m->graphics, old_igpu));
+    if (legacy && ram >= 64 && ram <= 2048 && light_gpu)
+        return (struct steam_assessment){FIT_PROMISING, "An older x86 CPU, modest RAM and light graphics make this worth trying."};
+    if (ram > 0 && ram < 64) {
+        if (legacy && light_gpu)
+            return (struct steam_assessment){FIT_PROMISING, "The store RAM value looks unusually low. The older CPU and modest graphics requirements make this worth trying."};
+        return (struct steam_assessment){FIT_UNKNOWN, "The store lists an unusually small RAM minimum. A reliable estimate needs better data."};
+    }
+    if (ram >= 64 && ram <= 1024 && dx >= 9 && dx <= 11) {
+        if (dx <= 10 && ((legacy && !m->graphics[0]) || (light_gpu && !m->processor[0])))
+            return (struct steam_assessment){FIT_PROMISING, "Low RAM and modest Direct3D 9/10 requirements make this worth trying. CPU or GPU details are incomplete."};
+        return (struct steam_assessment){FIT_UNKNOWN, "RAM demand is low and a Direct3D translation path exists. The listed hardware gives no clear frame-rate estimate."};
+    }
+    return (struct steam_assessment){FIT_UNKNOWN, "The listed Windows requirements give too little evidence to predict gameplay."};
 }

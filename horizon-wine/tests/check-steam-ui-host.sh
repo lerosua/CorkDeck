@@ -5,12 +5,13 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build=$(mktemp -d)
 trap 'rm -rf "$build"' EXIT HUP INT TERM
 mkdir -p "$build/logs"
+python3 "$root/tools/make-embed.py" "$build/seed.c" steam_community_seed "$root/../docs/compat/reports.tsv"
 cc=${CC:-cc}
 $cc -std=gnu11 -Wall -Wextra -Werror -no-pie -fsanitize=address,undefined \
     $(sdl2-config --cflags) "$root/tests/steam_ui_host.c" \
     "$root/source/steam/steam_ui.c" "$root/source/steam/steam_wire.c" \
     "$root/source/steam/steam_prerequisites.c" "$root/source/steam/steam_prerequisites_ui.c" "$root/source/steam/steam_library_ui.c" "$root/source/steam/steam_content.c" \
-    "$root/source/steam/steam_settings.c" "$root/source/steam/steam_file.c" "$root/source/steam/steam_diagnostics.c" "$root/source/steam/steam_artwork.c" "$root/source/steam/steam_compat.c" "$root/source/steam/steam_compat_store.c" \
+    "$root/source/steam/steam_settings.c" "$root/source/steam/steam_file.c" "$root/source/steam/steam_diagnostics.c" "$root/source/steam/steam_artwork.c" "$build/seed.c" "$root/source/steam/steam_community.c" "$root/source/steam/steam_compat.c" "$root/source/steam/steam_compat_store.c" "$root/source/steam/steam_detail_cache.c" \
     "$root/source/launcher_image.c" "$root/source/diagnostics/lan_log.c" \
     "$root/source/launcher_ui.c" "$root/source/launcher_svg.c" \
     "$root/source/launcher_audio.c" "$root/vendor/qrcodegen/qrcodegen.c" \

@@ -43,7 +43,7 @@ CorkDeck 仍处于实验阶段。较早的 Direct3D 9 至 11 游戏是比较现�
 以下功能对应 `codex/chinese-menu` 分支的开发和测试构建。上游发布包的具体功能以相应版本说明为准。
 
 - **未安装游戏的封面**优先从 SD 卡读取。缺图时直接向 Steam 请求，成功取得的图片会缓存在卡上，无需填写第三方图片服务的 API Key。
-- **游戏详情**优先展示 CorkDeck 的 Switch 实测记录。缺少实测时，会根据 Steam 商店列出的 Windows 最低配置给出判断和理由；资料不足时也会说明。Steam Deck 评级单独列出，它描述的是游戏在 Steam Deck 上的适配情况。
+- **游戏详情**优先展示 CorkDeck 的 Switch 实测记录。缺少实测时，按 Switch 的 4 GB 共享内存、处理器和转译开销给出预估图标与理由。下方列出 Steam 商店提供的 Windows 最低配置，方便对照。已读取的详情会保存在 SD 卡，重新进入时可直接查看，按 + 可刷新当前游戏的资料。
 - **游戏库缓存**按账户保存。使用已保存的会话重新打开应用时，会在连接 Steam 前读取上次同步的列表。完整缓存默认复用 24 小时，过期后再联网刷新。此功能已在 Switch 上验证过缓存命中。
 - **断网重连**已加入测试构建。连接中断时可继续浏览缓存，应用会在后台重试。右上角会显示「Steam 离线，等待重连」或「正在恢复 Steam 会话」，Steam 确认登录成功后显示「Steam 已登录」。同一进程内断网再联网的流程已通过模拟测试，真机结果待确认。
 
@@ -60,6 +60,10 @@ CorkDeck 仍处于实验阶段。较早的 Direct3D 9 至 11 游戏是比较现�
 ## 在 Apple Silicon Mac 上构建
 
 Mac 端使用 Homebrew 的 Bison 生成 Wine 所需文件，Switch 原生程序在 `ghcr.io/autorunhq/switch-dev:2026.10.12` 的 Linux ARM64 容器中编译。构建文档列出了工具链、镜像摘要、NRO 构建命令和 SD 卡 ZIP 的校验步骤。已有安装若需离线更新 Windows 组件，可使用 `horizon-wine/tools/package-offline-update.py` 将 NRO 与固定版本的 DLL 打入同一个更新包。[Mac 构建与离线打包步骤](BUILDING.md)
+
+## 游戏兼容性实测
+
+按 Steam AppID 或游戏名查询历史实测，也可以在已安装或未安装游戏的详情页查看。按 R 显示上报二维码，用手机填写测试阶段和运行设置。审核收录后，网页和主机从同一份表格更新。主机首次断网可查内置记录，联网刷新后会将完整列表保存在 `sdmc:/switch/wine/compat-reports.tsv`。按 + 可主动刷新；暂无实测时显示硬件预估。[查询实测表](docs/compat/reports.tsv) · [中文上报表单](https://github.com/lerosua/CorkDeck/issues/new?template=compatibility.yml)
 
 ## 日志与问题反馈
 

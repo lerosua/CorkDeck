@@ -18,7 +18,7 @@ void wine_nx_runtime_trace(const char *s){puts(s);}
 static int mode,install_calls,resume_calls;
 static enum steam_library_state library_state = STEAM_LIBRARY_READY;
 static char installed_language[32];
-int steam_provider_inspect(struct steam_provider *p,uint32_t app){(void)p;(void)app;return 1;}
+int steam_provider_inspect(struct steam_provider *p,uint32_t app,int refresh){(void)refresh;(void)p;(void)app;return 1;}
 void steam_provider_app_status(struct steam_provider *p,struct steam_app_view *v){(void)p;*v=(struct steam_app_view){.app_id=123,.state=2,.windows=1,.size=250u*1048576,.language_missing=mode==18,.available_languages=steam_language_mask("russian")|STEAM_LANGUAGE_BASE};}
 int steam_provider_uninstall(struct steam_provider *p,uint32_t app){(void)p;(void)app;return 1;}
 void steam_provider_remove_status(struct steam_provider *p,struct steam_remove_view *v){(void)p;memset(v,0,sizeof(*v));}

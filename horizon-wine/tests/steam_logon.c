@@ -174,8 +174,37 @@ static void test_cached_relaunch(struct steam_auth *a)
     puts("Library cache: pre-network restore, fresh/stale requests, offline, account isolation, corruption, empty library and logout passed");
 }
 
+static void test_install_detail_cache(void)
+{
+    char root[] = "/tmp/corkdeck-app-view-XXXXXX", path[512];
+    const struct steam_app_view saved = {.app_id=98, .state=2, .windows=1, .size=1024};
+    assert(mkdtemp(root) && steam_detail_write(root, 98, 42, "english", &saved, sizeof(saved)));
+    struct steam_provider *p = steam_provider_create();
+    assert(p && steam_provider_set_root(p, root));
+    strcpy(p->language, "english");
+    p->library.account = 42;
+    p->library.games = calloc(2, sizeof(*p->library.games)); assert(p->library.games);
+    p->library.count = 2; p->library.games[0].app_id=98; p->library.games[1].app_id=99;
+    assert(!steam_provider_inspect(p, 98, 0) && p->app_view.size == 1024 && !p->inspect_app);
+    assert(!steam_provider_inspect(p, 99, 0) && !p->app_view.state);
+    state(p, STEAM_ONLINE, 0, 0, 42);
+    assert(!steam_provider_inspect(p, 98, 0) && p->app_view.state == 2 && !p->inspect_app);
+    assert(steam_provider_inspect(p, 98, 1) && p->inspect_app == 98 && p->app_view.size == 1024);
+    struct steam_app_view other;
+    assert(!steam_detail_read(root, 98, 43, "english", &other, sizeof(other)));
+    assert(!steam_detail_read(root, 98, 42, "schinese", &other, sizeof(other)));
+    steam_provider_destroy(p);
+    snprintf(path, sizeof(path), "%s/steam/details/98-42-english.v1", root);
+    FILE *f = fopen(path, "ab"); assert(f && fputc(1, f) != EOF && !fclose(f));
+    assert(!steam_detail_read(root, 98, 42, "english", &other, sizeof(other)));
+    assert(!unlink(path)); snprintf(path, sizeof(path), "%s/steam/details", root); assert(!rmdir(path));
+    snprintf(path, sizeof(path), "%s/steam", root); assert(!rmdir(path) && !rmdir(root));
+    puts("Offline per-game installation details, manual refresh, account/language isolation and corruption passed.");
+}
+
 int main(void)
 {
+    test_install_detail_cache();
     assert(retry_transport(0,2)&&retry_transport(0,6)&&retry_transport(206,0));
     assert(retry_transport(100 + STEAM_NETWORK, CURLE_OPERATION_TIMEDOUT));
     assert(!retry_transport(100 + STEAM_PROTOCOL, 0));
@@ -201,7 +230,7 @@ int main(void)
     {struct steam_provider *p=steam_provider_create();assert(p);assert(steam_provider_set_root(p,"/tmp"));assert(!steam_provider_install(p,123));
      state(p,STEAM_ONLINE,0,0,a.steam_id);assert(!steam_provider_install(p,123));
      p->library.games=calloc(1,sizeof(*p->library.games));assert(p->library.games);p->library.count=1;p->library.games[0].app_id=123;
-     assert(!steam_provider_inspect(p,456));assert(steam_provider_inspect(p,123));assert(p->inspect_app==123&&p->app_view.state==1);assert(!steam_provider_inspect(p,123));
+     assert(!steam_provider_inspect(p,456,0));assert(steam_provider_inspect(p,123,0));assert(p->inspect_app==123&&p->app_view.state==1);assert(!steam_provider_inspect(p,123,0));
      assert(!steam_provider_install(p,456));assert(steam_provider_install(p,123));assert(!steam_provider_install(p,123));
      assert(!strcmp(p->install_language,p->language));
      p->install_app=0;p->download.state=STEAM_DOWNLOAD_ERROR;

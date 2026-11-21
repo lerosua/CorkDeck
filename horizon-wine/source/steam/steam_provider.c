@@ -5,6 +5,7 @@
 #include "steam_crypto.h"
 #include "steam_family.h"
 #include "steam_library_cache.h"
+#include "steam_detail_cache.h"
 #include <dirent.h>
 #include <curl/curl.h>
 #include "steam_session.h"
@@ -326,7 +327,7 @@ authenticated:
       finish_discard(p);
       int refresh;
       uint32_t install_app, inspect_app, remove_app;
-      char install_language[32];
+      char install_language[32], inspect_language[32];
       char vault_pass[128] = {0};
       int save;
       SDL_LockMutex(p->mutex);
@@ -354,6 +355,7 @@ authenticated:
         strcpy(install_language, p->install_language);
         p->install_app = 0;
         inspect_app = p->inspect_app;
+        strcpy(inspect_language, p->language);
         p->inspect_app = 0;
         remove_app = p->remove_app;
         p->remove_app = 0;
@@ -405,9 +407,7 @@ authenticated:
                                           .job = job};
           struct steam_app_view view = {.app_id = inspect_app, .state = 2};
           size_t i;
-          SDL_LockMutex(p->mutex);
-          strcpy(backend.language, p->language);
-          SDL_UnlockMutex(p->mutex);
+          strcpy(backend.language, inspect_language);
           if (!steam_backend_app(&backend, inspect_app, &app)) {
             view.state = 3;
             view.error = backend.error;
@@ -452,9 +452,16 @@ authenticated:
           }
           job = backend.job;
           SDL_LockMutex(p->mutex);
-          if (p->app_view.app_id == inspect_app)
+          if (view.state == 2) {
+            int saved = steam_detail_write(p->root, inspect_app, auth->steam_id, inspect_language,
+                                           &view, sizeof(view));
+            network_diag("stage=steam.details.install appid=%u cache=%s", inspect_app, saved ? "saved" : "write_failed");
+          }
+          if (p->app_view.app_id == inspect_app && !strcmp(p->language, inspect_language) &&
+              (view.state == 2 || p->app_view.state != 2))
             p->app_view = view;
           SDL_UnlockMutex(p->mutex);
+          wake_ui();
         }
         if (remove_app) {
           unsigned int error =
@@ -815,23 +822,33 @@ int steam_provider_resume_session(struct steam_provider *p)
     return 1;
 }
 
-int steam_provider_inspect(struct steam_provider *p, uint32_t app) {
-  size_t i;
-  int ok = 0;
+int steam_provider_inspect(struct steam_provider *p, uint32_t app, int refresh) {
+  int queued = 0;
   SDL_LockMutex(p->mutex);
-  if (p->view.state == STEAM_ONLINE && p->app_view.app_id != app) {
-    for (i = 0; i < p->library.count; ++i)
-      if (p->library.games[i].app_id == app) {
-        ok = 1;
-        break;
-      }
-    if (ok) {
-      p->inspect_app = app;
-      p->app_view = (struct steam_app_view){.app_id = app, .state = 1};
+  if (app && p->app_view.app_id != app) {
+    size_t i = 0;
+    while (i < p->library.count && p->library.games[i].app_id != app) ++i;
+    if (i == p->library.count) {
+      SDL_UnlockMutex(p->mutex);
+      return 0;
     }
+    p->inspect_app = 0;
+    p->app_view = (struct steam_app_view){.app_id = app};
+    struct steam_app_view cached;
+    if (steam_detail_read(p->root, app, p->library.account, p->language, &cached, sizeof(cached)) &&
+        cached.app_id == app && cached.state == 2 && !cached.error &&
+        memchr(cached.installscript, 0, sizeof(cached.installscript)))
+      p->app_view = cached;
+    network_diag("stage=steam.details.install appid=%u cache=%s", app, p->app_view.state == 2 ? "hit" : "miss");
+  }
+  if (app && p->view.state == STEAM_ONLINE && !p->inspect_app &&
+      (!p->app_view.state || (refresh && p->app_view.state != 1))) {
+    p->inspect_app = app;
+    if (p->app_view.state != 2) p->app_view.state = 1;
+    queued = 1;
   }
   SDL_UnlockMutex(p->mutex);
-  return ok;
+  return queued;
 }
 void steam_provider_app_status(struct steam_provider *p,
                                struct steam_app_view *out) {

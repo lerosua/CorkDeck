@@ -1,5 +1,7 @@
 #include "steam_library_ui.h"
 #include "../launcher_ui.h"
+#include "../app/app_version.h"
+#include "../../vendor/qrcodegen/qrcodegen.h"
 #include "steam_content.h"
 #include "steam_compat.h"
 #include "steam_provider.h"
@@ -144,59 +146,135 @@ static const char *store_status(enum store_state state)
     return state == STORE_PENDING ? "Reading Steam store..." : "Store data unavailable";
 }
 
-static void draw_compatibility(struct ui *ui, uint32_t app)
+static void detail_row(struct ui *ui, int y, const char *label, const char *value)
+{
+    ui_text_fit(ui, ui->small, 438, y, 158, label, ui->dim, 0);
+    ui_text_fit(ui, ui->small, 608, y, 576, value, ui->value, 1);
+}
+
+static int draw_compatibility(struct ui *ui, uint32_t app, int y, int show_specs)
 {
     struct steam_compat_view view;
-    char line[544];
     steam_compat_status(app, &view);
     const struct steam_minimum *m = &view.minimum;
-    const char *record = steam_compat_record(app);
-    const char *reason = record;
-    if (!reason)
-        reason = view.windows == STORE_READY ? steam_compat_estimate(m) : store_status(view.windows);
-    ui_text(ui, ui->normal, 438, 210, record ? "CorkDeck on Switch (tested)" : "Switch estimate (untested)", ui->value);
-    ui_text_wrapped(ui, ui->small, 438, 248, 742, 2, reason, ui->text, 0);
+    struct steam_assessment assessment = view.community.count
+        ? (struct steam_assessment){FIT_UNKNOWN, view.community.detail}
+        : steam_compat_estimate(view.windows == STORE_READY ? m : NULL);
+    static const struct { const char *label, *symbol; } badges[] = {
+        [FIT_UNKNOWN]        = {"Switch estimate / Unknown", "?"},
+        [FIT_PROMISING]      = {"Switch estimate / Worth trying", "+"},
+        [FIT_TIGHT]          = {"Switch estimate / Limited headroom", "~"},
+        [FIT_HIGH_RISK]      = {"Switch estimate / High risk", "!"},
+    };
+    enum steam_fit fit = assessment.fit;
+    SDL_Color color = ui->dim;
+    switch (fit) {
+    case FIT_PROMISING: color = ui->success; break;
+    case FIT_TIGHT: color = (SDL_Color){247, 194, 92, 255}; break;
+    case FIT_HIGH_RISK: color = ui->danger; break;
+    case FIT_UNKNOWN: break;
+    }
+    if (view.community.count) {
+        if (!strcmp(view.community.stage, "启动失败")) color = ui->danger;
+        else if (!strcmp(view.community.stage, "可持续游玩") || !strcmp(view.community.stage, "已通关")) color = ui->success;
+        else color = (SDL_Color){109, 191, 245, 255};
+    }
+    int cy = y + TTF_FontHeight(ui->normal) / 2;
+    ui_fill_circle(ui, 453, cy, 14, color);
+    ui_text_centered(ui, ui->normal, 453, y, view.community.count ? "•" : badges[fit].symbol, ui->background);
+    const char *label = assessment.reason ? badges[fit].label : "Switch estimate";
+    char report_label[144];
+    if (view.community.count) {
+        snprintf(report_label, sizeof(report_label), "Switch 实测 · %s（%u 条）",
+                 view.community.stage, view.community.count);
+        label = report_label;
+    }
+    ui_text_fit(ui, ui->normal, 480, y, 704, label, ui->value, 0);
+    y += TTF_FontHeight(ui->normal) + 8;
+    if (assessment.reason) {
+        int lines = ui_text_wrapped(ui, ui->small, 438, y, 746, 2, assessment.reason, ui->text, 0);
+        y += lines * (TTF_FontHeight(ui->small) + 4);
+    }
 
-    const char *summary = view.windows == STORE_READY ? "Not specified" : store_status(view.windows);
-    if (m->memory[0] || m->directx[0])
-        snprintf(line, sizeof(line), "%s   %s%s%s%s", ui_translate(ui, "Windows minimum"),
-                 m->memory, m->memory[0] && m->directx[0] ? "  /  " : "",
-                 m->directx[0] ? "DirectX " : "", m->directx);
-    else
-        snprintf(line, sizeof(line), "%s   %s", ui_translate(ui, "Windows minimum"), ui_translate(ui, summary));
-    ui_text_fit(ui, ui->small, 438, 311, 745, line, ui->value, 0);
-    if (m->processor[0]) {
-        snprintf(line, sizeof(line), "CPU   %s", m->processor);
-        ui_text_fit(ui, ui->small, 438, 340, 745, line, ui->dim, 1);
+    if (!show_specs) return y;
+    y += 14;
+    ui_fill(ui, 438, y, 746, 1, ui->card);
+    y += 14;
+    ui_text(ui, ui->normal, 438, y, "Windows minimum", ui->value);
+    y += TTF_FontHeight(ui->normal) + 6;
+    const struct { const char *label, *value; } rows[] = {
+        {"RAM", m->memory}, {"CPU", m->processor}, {"GPU", m->graphics}, {"DirectX", m->directx},
+    };
+    int first_row = y;
+    if (view.windows == STORE_READY) {
+        for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+            if (!rows[i].value[0]) continue;
+            detail_row(ui, y, rows[i].label, rows[i].value);
+            y += TTF_FontHeight(ui->small) + 6;
+        }
     }
-    if (m->graphics[0]) {
-        snprintf(line, sizeof(line), "GPU   %s", m->graphics);
-        ui_text_fit(ui, ui->small, 438, 368, 745, line, ui->dim, 1);
+    if (first_row == y) {
+        ui_text(ui, ui->small, 438, y, view.windows == STORE_READY ? "Not specified" : store_status(view.windows), ui->dim);
+        y += TTF_FontHeight(ui->small) + 6;
     }
-    const char *deck = view.deck == STORE_READY ? steam_compat_deck_rating(view.deck_category) : store_status(view.deck);
-    snprintf(line, sizeof(line), "Steam Deck   %s", ui_translate(ui, deck));
-    ui_text_fit(ui, ui->normal, 438, 406, 745, line, ui->value, 0);
+    return y;
+}
+static void report_compatibility(struct ui *ui, const struct steam_game *game)
+{
+    char url[256];
+    uint8_t code[qrcodegen_BUFFER_LEN_FOR_VERSION(10)], scratch[sizeof(code)];
+    snprintf(url, sizeof(url), "https://github.com/lerosua/CorkDeck/issues/new?template=compatibility.yml&appid=%u&version=%s",
+             game->app_id, CORKDECK_VERSION);
+    if (!qrcodegen_encodeText(url, scratch, code, qrcodegen_Ecc_MEDIUM, 1, 10, qrcodegen_Mask_AUTO, true))
+        return;
+    const int modules = qrcodegen_getSize(code), scale = 300 / (modules + 8);
+    const int side = (modules + 8) * scale, x = (1280 - side) / 2;
+    ui_start_screen(ui);
+    while (ui_begin_frame(ui)) {
+        struct ui_input input;
+        while (ui_poll(ui, &input))
+            if (input.button == UI_B || (input.touch == UI_TOUCH_TAP && input.y < 80)) return;
+        ui_background(ui);
+        ui_header_back(ui, "Report compatibility", game->name);
+        ui_fill(ui, x, 176, side, side, (SDL_Color){255,255,255,255});
+        for (int j = 0; j < modules; ++j)
+            for (int i = 0; i < modules; ++i)
+                if (qrcodegen_getModule(code, i, j))
+                    ui_fill(ui, x + (4+i)*scale, 176 + (4+j)*scale, scale, scale, (SDL_Color){0,0,0,255});
+        ui_text_centered(ui, ui->normal, 640, 510, "Scan to report this game on GitHub", ui->value);
+        const struct ui_hint hint = {UI_B, "Back"};
+        ui_footer(ui, &hint, 1);
+        ui_present(ui);
+        ui_wait(ui);
+    }
 }
 int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
                          const char *root, const struct steam_game *g,
                          const struct steam_launcher_adapter *adapter,struct steam_artwork *art) {
   char text[768], size[40], language[32];
   int prerequisite_queued=0;
-  const int button_y = g->installed ? 456 : 539;
-  if (!g->installed) steam_compat_request(g->app_id, 0);
+  const SDL_Rect action = g->installed ? (SDL_Rect){438, 456, 312, 58}
+                                       : (SDL_Rect){84, 578, 300, 58};
+  steam_compat_request(root, g->app_id, 0);
   struct steam_app_view app;
   struct steam_remove_view removal;
-  steam_provider_inspect(p, g->app_id);
   ui_start_screen(ui);
   while (ui_begin_frame(ui)) {
     struct ui_input input;
+    steam_provider_inspect(p, g->app_id, 0);
     steam_provider_app_status(p, &app);
     steam_provider_remove_status(p, &removal);
     steam_artwork_request(art,g->app_id);steam_artwork_tick(art,ui->renderer);
     while (ui_poll(ui, &input)) {
-      if(input.touch==UI_TOUCH_TAP&&input.x>=438&&input.x<750&&input.y>=button_y&&input.y<button_y+58)input.button=UI_A;
+      SDL_Point touch = {input.x, input.y};
+      if (input.touch == UI_TOUCH_TAP && SDL_PointInRect(&touch, &action)) input.button = UI_A;
       if (input.button == UI_B || (input.touch == UI_TOUCH_TAP && input.y < 80))
         goto done;
+      if (input.button == UI_R) {
+        report_compatibility(ui, g);
+        ui_start_screen(ui);
+        break;
+      }
       if (input.button == UI_X && g->installed == 1) {
         struct steam_download_view download;
         steam_provider_download_status(p,&download);
@@ -210,9 +288,8 @@ int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
         ui_start_screen(ui);break;
       }
       if (input.button == UI_PLUS) {
-        if (!g->installed) steam_compat_request(g->app_id, 1);
-        steam_provider_refresh_library(p);
-        steam_provider_inspect(p, g->app_id);
+        steam_compat_request(root, g->app_id, 1);
+        steam_provider_inspect(p, g->app_id, 1);
         break;
       }
       if (input.button == UI_A && !removal.busy) {
@@ -282,26 +359,47 @@ int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
     }
     ui_background(ui);
     ui_header_back(ui,"Steam game",g->installed==2?"Removal pending":g->installed?"Installed":"Available to install");
-    artwork_draw(ui,art,g->app_id,(SDL_Rect){84,126,300,450},18,255);
-    ui_text_wrapped(ui,ui->large,438,g->installed?142:112,735,2,g->name,ui->value,0);
-    bytes(size,app.size);
-    if(app.language_missing && app.app_id==g->app_id && app.state==2)snprintf(size,sizeof(size),"Choose language first");
-    snprintf(text,sizeof(text),"Installation  %s%s",app.app_id==g->app_id&&app.state==2?(app.language_missing?size:app.size?size:"Size unavailable"):app.app_id==g->app_id&&app.state==3?"Unavailable":"Reading Steam metadata...",app.app_id==g->app_id&&app.state==2&&app.size&&!app.language_missing?" (estimate)":"");
-    ui_text(ui,ui->normal,438,g->installed?274:458,text,ui->value);
-    steam_provider_language(p,language);
-    /* English stands in by itself for a language the game has no files in. */
-    if(app.app_id==g->app_id&&app.state==2&&app.english_fallback)
-      snprintf(text,sizeof(text),"Language  English (no files in %s)   /   %s",language,g->shared?"Steam Families":"Owned library");
-    else
-    snprintf(text,sizeof(text),"Language  %s%s   /   %s",language,app.app_id==g->app_id&&app.state==2&&app.language_missing?" (choose alternative)":"",g->shared?"Steam Families":"Owned library");
-    ui_text(ui,ui->small,438,g->installed?328:502,text,ui->dim);
-    if (!g->installed) draw_compatibility(ui, g->app_id);
-    else {
-      ui_text(ui,ui->small,438,366,"Compatibility  Unknown",ui->dim);
-      ui_text_wrapped(ui,ui->small,438,397,720,2,"Exact installation size and free SD space are checked before downloading.",ui->dim,0);
+    artwork_draw(ui, art, g->app_id, (SDL_Rect){84, g->installed ? 126 : 110, 300, 450}, 18, 255);
+    int title_y = g->installed ? 142 : 106;
+    int title_lines = ui_text_wrapped(ui, ui->large, 438, title_y, 746, 2, g->name, ui->value, 0);
+    int metadata_y = 274;
+    if (!g->installed) {
+      int fit_y = title_y + title_lines * (TTF_FontHeight(ui->large) + 4) + 10;
+      int specs_end = draw_compatibility(ui, g->app_id, fit_y, 1);
+      ui_fill(ui, 438, specs_end + 12, 746, 1, ui->card);
+      metadata_y = specs_end + 26;
     }
-    ui_rounded(ui,438,button_y,312,58,14,(SDL_Color){92,194,74,255});
-    ui_text_centered(ui,ui->normal,594,button_y+13,g->installed?"Add to the library":"Install",(SDL_Color){6,32,10,255});
+
+    int ready = app.app_id == g->app_id && app.state == 2;
+    const char *install_size = "Reading Steam metadata...";
+    if (ready) {
+      bytes(size, app.size);
+      install_size = app.language_missing ? "Choose language first" : app.size ? size : "Size unavailable";
+    } else if (app.app_id == g->app_id && app.state == 3) {
+      install_size = "Unavailable";
+    }
+    detail_row(ui, metadata_y, "Estimated size", install_size);
+    steam_provider_language(p, language);
+    const char *language_name = language;
+    for (size_t i = 0; i < steam_language_count; ++i) {
+      if (!strcmp(language, steam_languages[i].id)) {
+        language_name = ui_translate(ui, steam_languages[i].name);
+        break;
+      }
+    }
+    const char *source = ui_translate(ui, g->shared ? "Steam Families" : "Owned library");
+    if (ready && app.english_fallback)
+      snprintf(text, sizeof(text), ui_translate(ui, "English (no files in %s) / %s"), language_name, source);
+    else if (ready && app.language_missing)
+      snprintf(text, sizeof(text), ui_translate(ui, "%s (choose alternative) / %s"), language_name, source);
+    else
+      snprintf(text, sizeof(text), "%s / %s", language_name, source);
+    detail_row(ui, g->installed ? 328 : metadata_y + TTF_FontHeight(ui->small) + 6, "Game language", text);
+    if (g->installed) {
+      draw_compatibility(ui, g->app_id, 366, 0);
+    }
+    ui_rounded(ui,action.x,action.y,action.w,action.h,14,(SDL_Color){92,194,74,255});
+    ui_text_centered(ui,ui->normal,action.x+action.w/2,action.y+13,g->installed?"Add to the library":"Install",(SDL_Color){6,32,10,255});
     if (removal.error && removal.app_id == g->app_id) {
       snprintf(text, sizeof(text),
                "Uninstall error %u. Retry Delete game; check SD permissions "
@@ -311,18 +409,18 @@ int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
     }
     if (app.state == 3 && app.app_id == g->app_id) {
       snprintf(text, sizeof(text), "Steam metadata error %u", app.error);
-      ui_text(ui, ui->small, 84, g->installed?594:609, text, ui->danger);
+      ui_text(ui, ui->small, g->installed ? 84 : 438, g->installed?594:609, text, ui->danger);
     }
     if (g->installed) {
       const struct ui_hint h[] = {{UI_A, "Add / Choose executable"},
                                   {UI_Y, "Delete game"},
-                                  {UI_X, "Dependencies"},
+                                  {UI_X, "Dependencies"}, {UI_R, "Report compatibility"},
                                   {UI_B, "Back"}};
-      ui_footer(ui, h, 4);
+      ui_footer(ui, h, 5);
     } else {
       const struct ui_hint h[] = {
-          {UI_A, "Install"}, {UI_PLUS, "Retry metadata"}, {UI_B, "Back"}};
-      ui_footer(ui, h, 3);
+          {UI_A, "Install"}, {UI_PLUS, "Retry metadata"}, {UI_R, "Report compatibility"}, {UI_B, "Back"}};
+      ui_footer(ui, h, 4);
     }
     ui_present(ui);
     ui_wait(ui);
@@ -583,7 +681,7 @@ int steam_library_ui_page(struct ui *ui, struct steam_provider *p,
       ui_text_fit(ui, ui->small, 84, 149, 650, text, ui->dim, 0);
       if (count) {
         struct steam_app_view app;
-        steam_provider_inspect(p, rows[selected].app_id);
+        steam_provider_inspect(p, rows[selected].app_id, 0);
         steam_provider_app_status(p, &app);
         bytes(size, app.size);
         snprintf(text, sizeof(text), "Installation  %s%s",

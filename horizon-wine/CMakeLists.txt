@@ -676,17 +676,25 @@ target_sources(wine-nx-runtime PRIVATE
     source/steam/steam_probe.c source/steam/steam_directory.c source/steam/steam_ui.c
     source/steam/steam_wire.c source/steam/steam_cm_message.c source/steam/steam_auth.c
     source/steam/steam_cm.c source/steam/steam_cm_route.c source/steam/steam_crypto.c source/steam/steam_provider.c
-    source/steam/steam_library.c source/steam/steam_library_cache.c source/steam/steam_app.c source/steam/steam_backend.c
+    source/steam/steam_library.c source/steam/steam_library_cache.c source/steam/steam_detail_cache.c source/steam/steam_app.c source/steam/steam_backend.c
     source/steam/steam_family.c source/steam/steam_settings.c source/steam/steam_session.c source/steam/steam_device_key.c
     source/steam/steam_content.c source/steam/steam_manifest.c source/steam/steam_install.c source/steam/steam_storage.c source/steam/steam_engine.c
     source/steam/steam_library_ui.c source/steam/steam_prerequisites.c source/steam/steam_prerequisites_ui.c source/steam/steam_local.c
     source/steam/steam_install_script.c
     source/steam/steam_cdn.c source/steam/steam_diagnostics.c source/steam/steam_file.c
-    source/steam/steam_artwork.c source/steam/steam_compat.c source/steam/steam_compat_store.c source/diagnostics/lan_log.c
+    source/steam/steam_artwork.c source/steam/steam_compat.c source/steam/steam_compat_store.c source/steam/steam_community.c
+    "${CMAKE_CURRENT_BINARY_DIR}/steam_community_seed.c" source/diagnostics/lan_log.c
     vendor/qrcodegen/qrcodegen.c
     source/launcher_setup.c source/setup_boot.c source/forwarder.c
     source/launcher_dlls.c source/horizon_dlls.c source/horizon_dlls_curl.c
     "${CMAKE_CURRENT_BINARY_DIR}/horizon_dll_features.h")
+set(COMMUNITY_TABLE "${CMAKE_CURRENT_SOURCE_DIR}/../docs/compat/reports.tsv")
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/steam_community_seed.c"
+    COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-embed.py"
+            "${CMAKE_CURRENT_BINARY_DIR}/steam_community_seed.c" steam_community_seed "${COMMUNITY_TABLE}"
+    DEPENDS "${COMMUNITY_TABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-embed.py"
+    VERBATIM)
 # What this runtime reports to the DLL repository's manifest, read from the same
 # sources horizon-dlls/tools/build-dlls.py reads what each file requires from.
 execute_process(COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/tools/runtime_features.py" --sources

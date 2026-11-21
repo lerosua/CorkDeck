@@ -1,4 +1,5 @@
 #include "steam_compat.h"
+#include "steam_detail_cache.h"
 #include "../network_diag_curl.h"
 #include <SDL.h>
 #include <curl/curl.h>
@@ -14,7 +15,11 @@ static struct {
     SDL_atomic_t generation;
     uint32_t app;
     struct steam_compat_view view;
-    int stop;
+    char root[256];
+    int stop, fetching, sync_catalog;
+    Uint32 last_sync;
+    unsigned char *catalog;
+    size_t catalog_size;
 } store;
 #define STORE_LIMIT (1024u * 1024u)
 
@@ -46,12 +51,12 @@ static int fetch(CURL *curl, const char *url, struct response *r, uint32_t app, 
     long http = 0;
     r->size = 0;
     if (!curl || !r->bytes) {
-        network_diag("stage=steam.compat.%s appid=%u result=init_failed", stage, app);
+        network_diag("stage=%s appid=%u result=init_failed", stage, app);
         return 0;
     }
     curl_easy_reset(curl);
 #define OPTION(k,v) do { CURLcode opt = curl_easy_setopt(curl, k, v); if (opt != CURLE_OK) { \
-        network_diag("stage=steam.compat.%s appid=%u result=setup_failed curl=%d", stage, app, (int)opt); return 0; } } while (0)
+        network_diag("stage=%s appid=%u result=setup_failed curl=%d", stage, app, (int)opt); return 0; } } while (0)
     OPTION(CURLOPT_URL, url);
     OPTION(CURLOPT_PROXY, "");
     OPTION(CURLOPT_ACCEPT_ENCODING, "");
@@ -67,7 +72,7 @@ static int fetch(CURL *curl, const char *url, struct response *r, uint32_t app, 
     CURLcode code = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
     char context[96];
-    snprintf(context, sizeof(context), "steam.compat.%s appid=%u bytes=%zu", stage, app, r->size);
+    snprintf(context, sizeof(context), "%s appid=%u bytes=%zu", stage, app, r->size);
     network_diag_curl(context, curl, code);
     return code == CURLE_OK && http == 200;
 }
@@ -101,6 +106,13 @@ static void wake_page(void)
     SDL_PushEvent(&event);
 }
 
+static void lookup_community(void)
+{
+    community_lookup(store.catalog ? store.catalog : steam_community_seed,
+                     store.catalog ? store.catalog_size : steam_community_seed_size,
+                     store.app, &store.view.community);
+}
+
 static int run(void *unused)
 {
     (void)unused;
@@ -108,36 +120,61 @@ static int run(void *unused)
     struct response r = {.bytes = malloc(STORE_LIMIT)};
     SDL_LockMutex(store.mutex);
     while (!store.stop) {
-        if (r.generation == SDL_AtomicGet(&store.generation)) {
+        if (!store.fetching && !store.sync_catalog) {
             SDL_CondWait(store.changed, store.mutex);
             continue;
         }
         r.generation = SDL_AtomicGet(&store.generation);
         uint32_t app = store.app;
+        char root[sizeof(store.root)];
+        strcpy(root, store.root);
         struct steam_minimum minimum = {0};
-        unsigned int category = 0;
         char url[160];
+        if (store.sync_catalog) {
+            SDL_UnlockMutex(store.mutex);
+            int fetched = fetch(curl, COMMUNITY_URL, &r, app, "steam.compat.community");
+            struct community_result result;
+            int valid = fetched && community_lookup((unsigned char *)r.bytes, r.size, app, &result);
+            SDL_LockMutex(store.mutex);
+            if (r.generation != SDL_AtomicGet(&store.generation)) continue;
+            store.sync_catalog = 0;
+            store.last_sync = SDL_GetTicks();
+            if (valid) {
+                int saved = community_save(root, (unsigned char *)r.bytes, r.size);
+                unsigned char *copy = malloc(r.size);
+                if (copy) {
+                    memcpy(copy, r.bytes, r.size);
+                    free(store.catalog);
+                    store.catalog = copy;
+                    store.catalog_size = r.size;
+                    store.view.community = result;
+                }
+                network_diag("stage=steam.compat.community cache=%s appid=%u reports=%u",
+                             saved ? "saved" : "write_failed", app, result.count);
+            } else {
+                network_diag("stage=steam.compat.community cache=kept result=%s",
+                             fetched ? "invalid" : "offline_or_unavailable");
+            }
+            wake_page();
+            continue;
+        }
         SDL_UnlockMutex(store.mutex);
         snprintf(url, sizeof(url), "https://store.steampowered.com/api/appdetails?appids=%u&l=english", app);
-        int fetched = fetch(curl, url, &r, app, "windows");
+        int fetched = fetch(curl, url, &r, app, "steam.compat.windows");
         int ok = fetched && steam_compat_parse_minimum(r.bytes, r.size, app, &minimum);
         log_minimum(app, fetched, ok, minimum);
         SDL_LockMutex(store.mutex);
         if (r.generation != SDL_AtomicGet(&store.generation)) continue;
-        store.view.minimum = minimum;
-        store.view.windows = ok ? STORE_READY : STORE_UNAVAILABLE;
-        SDL_UnlockMutex(store.mutex);
-        wake_page();
-        snprintf(url, sizeof(url), "https://store.steampowered.com/saleaction/ajaxgetdeckappcompatibilityreport?nAppID=%u", app);
-        fetched = fetch(curl, url, &r, app, "deck");
-        ok = fetched && steam_compat_parse_deck(r.bytes, r.size, app, &category);
-        network_diag("stage=steam.compat.deck.parse appid=%u result=%s category=%d rating=\"%s\"",
-                     app, !fetched ? "not_fetched" : ok ? "ok" : "invalid",
-                     ok ? (int)category : -1, ok ? steam_compat_deck_rating(category) : "-");
-        SDL_LockMutex(store.mutex);
-        if (r.generation != SDL_AtomicGet(&store.generation)) continue;
-        store.view.deck_category = category;
-        store.view.deck = ok ? STORE_READY : STORE_UNAVAILABLE;
+        store.fetching = 0;
+        if (ok && (store.view.windows != STORE_READY || minimum.memory[0] || minimum.processor[0] ||
+                   minimum.graphics[0] || minimum.directx[0])) {
+            store.view.minimum = minimum;
+            store.view.windows = STORE_READY;
+            int saved = steam_detail_write(root, app, 0, NULL, &minimum, sizeof(minimum));
+            network_diag("stage=steam.details.windows appid=%u cache=%s", app, saved ? "saved" : "write_failed");
+        } else if (store.view.windows != STORE_READY) {
+            store.view.windows = STORE_UNAVAILABLE;
+        }
         SDL_UnlockMutex(store.mutex);
         wake_page();
         SDL_LockMutex(store.mutex);
@@ -160,12 +197,13 @@ void steam_compat_shutdown(void)
     }
     if (store.changed) SDL_DestroyCond(store.changed);
     if (store.mutex) SDL_DestroyMutex(store.mutex);
+    free(store.catalog);
     memset(&store, 0, sizeof(store));
 }
 
-void steam_compat_request(uint32_t app, int retry)
+void steam_compat_request(const char *root, uint32_t app, int retry)
 {
-    if (!app) return;
+    if (!app || !root || strlen(root) >= sizeof(store.root)) return;
     if (!store.thread) {
         store.mutex = SDL_CreateMutex();
         store.changed = SDL_CreateCond();
@@ -174,18 +212,43 @@ void steam_compat_request(uint32_t app, int retry)
         if (!store.thread) { steam_compat_shutdown(); return; }
     }
     SDL_LockMutex(store.mutex);
-    if (app != store.app || (retry && store.view.deck != STORE_PENDING)) {
-        store.app = app;
-        store.view = (struct steam_compat_view){0};
+    if (app != store.app || strcmp(store.root, root)) {
         SDL_AtomicAdd(&store.generation, 1);
-        SDL_CondSignal(store.changed);
+        if (strcmp(store.root, root)) {
+            free(store.catalog);
+            store.catalog = community_read(root, &store.catalog_size);
+            network_diag("stage=steam.compat.community source=%s", store.catalog ? "sd" : "bundled");
+            store.sync_catalog = 1;
+        }
+        store.app = app;
+        strcpy(store.root, root);
+        store.fetching = 0;
+        store.view = (struct steam_compat_view){0};
+        lookup_community();
+        struct steam_minimum m;
+        if (steam_detail_read(root, app, 0, NULL, &m, sizeof(m)) &&
+            memchr(m.processor, 0, sizeof(m.processor)) && memchr(m.memory, 0, sizeof(m.memory)) &&
+            memchr(m.graphics, 0, sizeof(m.graphics)) && memchr(m.directx, 0, sizeof(m.directx))) {
+            store.view.minimum = m;
+            store.view.windows = STORE_READY;
+        }
+        network_diag("stage=steam.details.windows appid=%u cache=%s", app,
+                     store.view.windows == STORE_READY ? "hit" : "miss");
     }
+    if (retry || SDL_GetTicks() - store.last_sync >= 30u * 60u * 1000u)
+        store.sync_catalog = 1;
+    if (!store.fetching && (retry || store.view.windows != STORE_READY)) {
+        store.fetching = 1;
+        if (store.view.windows != STORE_READY) store.view.windows = STORE_PENDING;
+        SDL_AtomicAdd(&store.generation, 1);
+    }
+    SDL_CondSignal(store.changed);
     SDL_UnlockMutex(store.mutex);
 }
 
 void steam_compat_status(uint32_t app, struct steam_compat_view *view)
 {
-    *view = (struct steam_compat_view){.windows = STORE_UNAVAILABLE, .deck = STORE_UNAVAILABLE};
+    *view = (struct steam_compat_view){.windows = STORE_UNAVAILABLE};
     if (!store.thread) return;
     SDL_LockMutex(store.mutex);
     if (store.app == app) *view = store.view;

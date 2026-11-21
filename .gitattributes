@@ -69,3 +69,6 @@ dlls/win32u/vertical.c generated
 dlls/wineps.drv/direction.c generated
 dlls/wineps.drv/vertical.c generated
 nls/*.nls generated
+
+# Shared compatibility catalog is embedded byte-for-byte in the runtime.
+docs/compat/reports.tsv text eol=lf
