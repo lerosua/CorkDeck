@@ -22,6 +22,7 @@
 #include "../config_json.h"
 #include "../system_language.h"
 #include "../steam/steam_provider.h"
+#include "../steam/steam_artwork.h"
 #include "shell_strings.inc"
 
 #define SH_BLUE      (SDL_Color){ 26, 159, 255, 255 }
@@ -71,6 +72,8 @@ static struct shell
     int status, hour, minute, battery, charging;
     unsigned int app_id[LAUNCHER_MAX_ENTRIES];
     /* Covers and wide pictures of Steam games, fetched on a thread of their own. */
+    struct steam_artwork *library_art;
+    int library_art_started;
     SDL_Thread *art_thread;
     SDL_atomic_t art_stop, art_done;
     int art_index;
@@ -525,6 +528,8 @@ static void sh_art_pump( struct launcher *l )
 
 static void sh_art_stop( void )
 {
+    steam_artwork_destroy( sh.library_art );
+    sh.library_art = NULL;
     if (!sh.art_thread) return;
     SDL_AtomicSet( &sh.art_stop, 1 );
     SDL_WaitThread( sh.art_thread, NULL );
@@ -656,6 +661,16 @@ static void sh_blank_cover( struct ui *ui, const char *title, SDL_Rect r, int di
     sh_title( ui, r.x + 10, r.y + r.h - 10, r.w - 20, title, ui->value );
 }
 
+static struct steam_artwork *sh_library_art( struct launcher *l )
+{
+    if (!sh.library_art_started)
+    {
+        sh.library_art_started = 1;
+        sh.library_art = steam_artwork_create( l->options->runtime_dir );
+    }
+    return sh.library_art;
+}
+
 static void sh_card( struct launcher *l, int item, SDL_Rect r, int focused, int code )
 {
     struct ui *ui = &l->ui;
@@ -664,7 +679,16 @@ static void sh_card( struct launcher *l, int item, SDL_Rect r, int focused, int 
     {
         const struct steam_game *game = &sh.owned[-1 - item];
 
-        sh_blank_cover( ui, game->name, r, 1 );
+        struct steam_artwork *art = sh_library_art( l );
+        int width, height;
+        steam_artwork_request( art, game->app_id );
+        SDL_Texture *texture = steam_artwork_texture( art, game->app_id, &width, &height );
+        if (texture)
+        {
+            SDL_Rect crop = cover_crop( width, height, r.w, r.h );
+            ui_rounded_texture( ui, texture, &crop, r, 10, (SDL_Color){255, 255, 255, 255} );
+        }
+        else sh_blank_cover( ui, game->name, r, 1 );
         sh_tag( ui, r.x + 8, r.y + 8, r.w - 16, "NOT INSTALLED", ui->dim );
     }
     else
@@ -3396,7 +3420,7 @@ static int sh_open_item( struct launcher *l, int item, char *target, size_t size
 
     if (item < 0)
     {
-        steam_ui_game( &l->ui, l->options->runtime_dir, &sh.owned[-1 - item] );
+        steam_ui_game( &l->ui, l->options->runtime_dir, &sh.owned[-1 - item], sh_library_art( l ) );
         sh_read_owned( l, 1 );
         rebuild_lists( l, -1 );
         sh_rebuild( l, -1 );
@@ -3569,6 +3593,7 @@ static int shell_run( struct launcher *l, char *target, size_t size )
         }
         pump_icons( l );
         sh_art_pump( l );
+        steam_artwork_tick( sh.library_art, ui->renderer );
         while (ui_poll( ui, &input ))
         {
             int columns = sh.list_view ? 1 : 7, page_rows = sh.list_view ? 8 : 2, destination = -2, item = -1000;

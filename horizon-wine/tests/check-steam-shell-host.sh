@@ -35,7 +35,7 @@ for target in launcher steam-adapter; do
         -lminizip -llzma -lzstd -lz -lcrypto -lpthread -lm -o "$build/$target"
 done
 mkdir -p "$build/card/sdmc:/switch/wine/logs" "$build/shots"
-(cd "$build/card" && "$build/steam-adapter")
+(cd "$build/card" && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy "$build/steam-adapter")
 
 # Eight programs added by hand and no account: Downloads from the main menu
 # (-) has nothing to show, the library's "Not installed" tab says where the

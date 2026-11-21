@@ -1232,25 +1232,25 @@ static void footer_mark( void *data )
     draw_footprint( data );
 }
 
-static SDL_Rect cover_crop( const struct program *p, int width, int height )
+static SDL_Rect cover_crop( int image_w, int image_h, int width, int height )
 {
-    SDL_Rect src = {0, 0, p->icon_width, p->icon_height};
+    SDL_Rect src = {0, 0, image_w, image_h};
     if (src.w * height > src.h * width)
     {
-        src.w = src.h * width / height;
-        src.x = (p->icon_width - src.w) / 2;
+        src.w = SDL_max( 1, src.h * width / height );
+        src.x = (image_w - src.w) / 2;
     }
     else
     {
-        src.h = src.w * height / width;
-        src.y = (p->icon_height - src.h) / 2;
+        src.h = SDL_max( 1, src.w * height / width );
+        src.y = (image_h - src.h) / 2;
     }
     return src;
 }
 
 static void draw_cover( struct ui *ui, const struct program *p, SDL_Rect rect, int radius, int brightness, int alpha )
 {
-    SDL_Rect src = cover_crop( p, rect.w, rect.h );
+    SDL_Rect src = cover_crop( p->icon_width, p->icon_height, rect.w, rect.h );
 
     ui_rounded_texture( ui, p->icon, &src, rect, radius, (SDL_Color){ brightness, brightness, brightness, alpha } );
 }

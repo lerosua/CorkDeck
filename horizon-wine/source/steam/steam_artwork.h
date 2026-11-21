@@ -4,7 +4,7 @@
 #include <stdint.h>
 struct steam_artwork;
 /* Public official Steam CDN only. Worker owns fetch/decode; UI owns textures.
- * Twelve bounded texture slots, one request, optional 64 MiB disk cache. */
+ * Bounded texture slots, one request, optional 64 MiB disk cache. */
 struct steam_artwork *steam_artwork_create(const char *root);
 void steam_artwork_request(struct steam_artwork *, uint32_t appid);
 void steam_artwork_pause(struct steam_artwork *, int paused);

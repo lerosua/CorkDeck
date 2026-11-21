@@ -619,11 +619,11 @@ size_t steam_ui_owned(const char *root,struct steam_game *games,size_t capacity)
     if(l.state!=STEAM_LIBRARY_READY)return 0;
     return steam_provider_library_page(provider,"",0,games,capacity,&total);
 }
-void steam_ui_game(struct ui *ui,const char *root,const struct steam_game *game)
+void steam_ui_game(struct ui *ui,const char *root,const struct steam_game *game,struct steam_artwork *art)
 {
     steam_ui_prepare(root);
     if(!provider){ui_message(ui,"Steam","Unable to create provider.");return;}
-    steam_library_ui_game(ui,provider,root,game,&launcher);
+    steam_library_ui_game(ui,provider,root,game,&launcher,art);
 }
 /* The shortest way to being signed in: the saved session when there is one,
  * the sign-in screen (QR first) when there is not. */

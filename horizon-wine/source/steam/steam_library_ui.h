@@ -9,6 +9,7 @@ struct steam_game;
 void steam_library_ui_open(struct ui *,struct steam_provider *,const char *,const struct steam_launcher_adapter *);
 int steam_library_ui_page(struct ui *,struct steam_provider *,const char *,const struct steam_launcher_adapter *,int tab);
 /* One game's page on its own, as the library's own list opens it. */
+struct steam_artwork;
 int steam_library_ui_game(struct ui *,struct steam_provider *,const char *root,const struct steam_game *,
-                          const struct steam_launcher_adapter *);
+                          const struct steam_launcher_adapter *,struct steam_artwork *);
 #endif

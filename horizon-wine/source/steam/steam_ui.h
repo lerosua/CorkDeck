@@ -46,7 +46,8 @@ void steam_ui_note_install(uint32_t app_id);
 /* The account's games as the library has them loaded; 0 when it is not loaded. */
 size_t steam_ui_owned(const char *runtime_dir,struct steam_game *,size_t capacity);
 /* The page of one game: install, verify, choose its program, remove. */
-void steam_ui_game(struct ui *,const char *runtime_dir,const struct steam_game *);
+struct steam_artwork;
+void steam_ui_game(struct ui *,const char *runtime_dir,const struct steam_game *,struct steam_artwork *);
 void steam_ui_sign_in(struct ui *,const char *runtime_dir);
 void steam_ui_autoresume(const char *runtime_dir);
 #endif

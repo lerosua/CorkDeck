@@ -138,7 +138,7 @@ static int register_game(struct ui *ui, const char *root,
              "third-party launcher may be required.");
   return 1;
 }
-static int game_details(struct ui *ui, struct steam_provider *p,
+int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
                          const char *root, const struct steam_game *g,
                          const struct steam_launcher_adapter *adapter,struct steam_artwork *art) {
   char text[768], size[40], language[32];
@@ -483,7 +483,7 @@ int steam_library_ui_page(struct ui *ui, struct steam_provider *p,
         input.button = UI_A;
       }
       if ((input.button == UI_A || input.button == UI_Y) && count) {
-        if(game_details(ui, p, root, &rows[selected], a,art)){destination=-2;goto finished;}
+        if(steam_library_ui_game(ui, p, root, &rows[selected], a,art)){destination=-2;goto finished;}
         steam_provider_download_status(p, &d);
         if (d.app_id == rows[selected].app_id &&
             steam_download_active(d.state))
@@ -729,12 +729,4 @@ void steam_library_ui_open(struct ui *ui, struct steam_provider *p,
                            const char *root,
                            const struct steam_launcher_adapter *a) {
   steam_library_ui_page(ui, p, root, a, 0);
-}
-
-int steam_library_ui_game(struct ui *ui, struct steam_provider *p, const char *root, const struct steam_game *g,
-                          const struct steam_launcher_adapter *a) {
-  struct steam_artwork *art = steam_artwork_create(root);
-  int result = game_details(ui, p, root, g, a, art);
-  steam_artwork_destroy(art);
-  return result;
 }

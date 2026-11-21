@@ -9,12 +9,15 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#define ART_SLOTS 12
+/* Two rows of seven visible cards, plus room for an in-flight request while paging. */
+#define ART_SLOTS 16
 #define ART_BYTES (2u * 1024u * 1024u)
+enum cover_state { EMPTY, CHECK_CACHE, LOADING, READY, FAILED, NEED_DOWNLOAD };
 struct cover {
   uint32_t appid;
   unsigned int use;
-  int state, width, height;
+  enum cover_state state;
+  int width, height;
   struct launcher_icon decoded;
   SDL_Texture *texture;
 };
@@ -77,26 +80,22 @@ static int run(void *opaque) {
     uint32_t appid = 0;
     char path[560];
     struct launcher_icon icon = {0};
-    int loaded = 0;
+    int loaded = 0, cache_only = 0;
     SDL_LockMutex(p->mutex);
     for (;;) {
       if (SDL_AtomicGet(&p->stop))
         break;
+      /* Check queued cards on SD before starting another network transfer. */
       for (index = 0; index < ART_SLOTS; ++index)
-        if (p->covers[index].state == 1) {
-          if (SDL_AtomicGet(&p->paused)) {
-            char cached[560];
-            if (!p->cache[0])
-              continue;
-            snprintf(cached, sizeof(cached), "%s/%u.jpg", p->cache,
-                     p->covers[index].appid);
-            if (!regular(cached))
-              continue;
-          }
-          appid = p->covers[index].appid;
-          p->covers[index].state = 2;
-          break;
-        }
+        if (p->covers[index].state == CHECK_CACHE) break;
+      if (index == ART_SLOTS && !SDL_AtomicGet(&p->paused))
+        for (index = 0; index < ART_SLOTS; ++index)
+          if (p->covers[index].state == NEED_DOWNLOAD) break;
+      if (index < ART_SLOTS) {
+        cache_only = p->covers[index].state == CHECK_CACHE;
+        appid = p->covers[index].appid;
+        p->covers[index].state = LOADING;
+      }
       if (appid)
         break;
       SDL_CondWaitTimeout(p->condition, p->mutex, 100);
@@ -107,9 +106,16 @@ static int run(void *opaque) {
     path[0] = 0;
     if (p->cache[0])
       snprintf(path, sizeof(path), "%s/%u.jpg", p->cache, appid);
-    if (path[0] && regular(path))
-      loaded = launcher_image_load(path, &icon);
-    for (kind = 0; kind < 2 && !loaded && !SDL_AtomicGet(&p->stop) &&
+    if (cache_only && path[0]) {
+      if (regular(path)) loaded = launcher_image_load(path, &icon);
+      if (!loaded) {
+        /* The installed-game page stores its portrait under this older name. */
+        char portrait[560];
+        snprintf(portrait, sizeof(portrait), "%s/corkdeck-%u-cover.jpg", p->cache, appid);
+        loaded = regular(portrait) && launcher_image_load(portrait, &icon);
+      }
+    }
+    for (kind = 0; kind < 2 && !cache_only && !loaded && !SDL_AtomicGet(&p->stop) &&
                    !SDL_AtomicGet(&p->paused);
          ++kind) {
       char url[256];
@@ -180,9 +186,9 @@ static int run(void *opaque) {
       if (loaded) {
         p->covers[index].decoded = icon;
         memset(&icon, 0, sizeof(icon));
-        p->covers[index].state = 3;
+        p->covers[index].state = READY;
       } else
-        p->covers[index].state = SDL_AtomicGet(&p->paused) ? 1 : 4;
+        p->covers[index].state = (cache_only || SDL_AtomicGet(&p->paused)) ? NEED_DOWNLOAD : FAILED;
     }
     SDL_UnlockMutex(p->mutex);
     launcher_icon_free(&icon);
@@ -254,7 +260,7 @@ void steam_artwork_request(struct steam_artwork *p, uint32_t appid) {
       SDL_UnlockMutex(p->mutex);
       return;
     }
-    if (p->covers[i].state != 2 && p->covers[i].use < oldest) {
+    if (p->covers[i].state != LOADING && p->covers[i].use < oldest) {
       oldest = p->covers[i].use;
       chosen = (int)i;
     }
@@ -264,7 +270,7 @@ void steam_artwork_request(struct steam_artwork *p, uint32_t appid) {
     if (c->texture)
       SDL_DestroyTexture(c->texture);
     launcher_icon_free(&c->decoded);
-    *c = (struct cover){.appid = appid, .use = ++p->use, .state = 1};
+    *c = (struct cover){.appid = appid, .use = ++p->use, .state = CHECK_CACHE};
     SDL_CondSignal(p->condition);
   }
   SDL_UnlockMutex(p->mutex);
