@@ -23,6 +23,12 @@ root = Path(__file__).resolve().parents[2]
 horizon_wine = root / 'horizon-wine'
 
 
+def has_switch_vulkan_driver(nro):
+    """The driver entry points named by Wine's tracing code in the linked NRO."""
+    return (b'wine_nx_drv_VulkanInit\0' in nro and
+            b'nx_vulkan_surface_create\0' in nro)
+
+
 def static_unix_libs():
     """The modules the runtime's native and WoW64 unix-call tables name."""
     text = (root / 'dlls/ntdll/unix/virtual.c').read_text()

@@ -1,4 +1,148 @@
-# Building the unchanged baseline
+# Building CorkDeck
+
+## Apple Silicon Mac to Nintendo Switch
+
+Tested with CorkDeck 0.3e (`adc0b522`), macOS 26.6.2, Homebrew Bison 3.8.2
+and OrbStack running Linux ARM64 containers. The build produces the Switch NRO
+and an SD-card ZIP. The Mac prepares Wine's headers and Windows setup programs.
+The container supplies devkitA64, CMake, Ninja, libnx and Mesa.
+
+### 1. Start from a clean checkout
+
+Use a checkout that includes the shared Vulkan driver check in
+`horizon-wine/tools/runtime_features.py`. The original `adc0b522` predates
+that packaging fix. To reproduce that exact source plus the fix, run this
+block **from the updated CorkDeck tree**. It carries just the three packaging
+files' changes to a fresh checkout. If your clean checkout already contains
+the fix, start at `git submodule update` below.
+
+```sh
+set -e
+patch_file=$(mktemp)
+git diff adc0b522 -- horizon-wine/tools/package-amd64.py \
+  horizon-wine/tools/package-autorun.py horizon-wine/tools/runtime_features.py > "$patch_file"
+git clone https://github.com/plv890/CorkDeck.git ../CorkDeck-mac
+cd ../CorkDeck-mac
+git checkout --detach adc0b522
+git apply "$patch_file"
+rm "$patch_file"
+```
+
+Run the remaining blocks in the same shell from the checkout root. Start the
+Docker engine and have Homebrew and the Xcode Command Line Tools available.
+
+```sh
+set -e
+git submodule update --init horizon-dlls
+git submodule status horizon-dlls
+brew install bison
+export PATH="$(brew --prefix bison)/bin:$PATH"
+bison --version
+xcrun --find clang
+docker info >/dev/null
+```
+
+For 0.3e the DLL submodule should be at
+`ffb73f3074914f79b04a7c5635b478eaf0ab19e2`. Wine needs Bison 3.0 or
+newer. The PATH change selects Homebrew's keg-only Bison for this shell.
+
+### 2. Fetch the ARM64 image and Mac toolchain
+
+The top-level `build.sh` still pulls the older tag from `horizon-wine/switch-dev.txt`
+for the boot bundle. It returned `not found` during the Mac build. Use the
+component script in step 3 so both container builds use the tested image.
+
+```sh
+export DOCKER_DEFAULT_PLATFORM=linux/arm64
+export WINE_NX_DEVKIT_IMAGE=ghcr.io/autorunhq/switch-dev:2026.10.12@sha256:ba1197f4ff6afe334b960535812ef4c412346cbefb15548d9300d9fc2aebaf23
+docker pull --platform linux/arm64 "$WINE_NX_DEVKIT_IMAGE"
+docker image inspect "$WINE_NX_DEVKIT_IMAGE" --format '{{.Os}}/{{.Architecture}}'
+
+toolchains="$PWD/horizon-wine/toolchains"
+llvm_name=llvm-mingw-20260505-ucrt-macos-universal
+export WINE_NX_LLVM_MINGW="$toolchains/$llvm_name"
+mkdir -p "$toolchains"
+(
+  cd "$toolchains"
+  curl -fL --retry 3 -o "$llvm_name.tar.xz" \
+    "https://github.com/mstorsjo/llvm-mingw/releases/download/20260505/$llvm_name.tar.xz"
+  printf '%s  %s\n' 050379de888f0c843787819dadf183df3693330a5724643919e9121f16355295 \
+    "$llvm_name.tar.xz" | shasum -a 256 -c -
+  tar -xJf "$llvm_name.tar.xz"
+)
+```
+
+### 3. Build the boot bundle and runtime
+
+The boot step needs network access on a clean checkout. It fetches the pinned
+Atmosphère 1.11.2 and Horizon-OC 2.5.1 inputs and builds both loaders and
+Mesosphère against the released libnx. An explicit bundle path makes the
+runtime build fail early if the manifest is missing.
+
+```sh
+export WINE_NX_JOBS=8
+export WINE_NX_BOOT_BUNDLE_DIR="$toolchains/boot-payloads/bundle"
+docker run --rm --platform linux/arm64 -v "$PWD:/work" -w /work \
+  -e WINE_NX_JOBS -e DEVKITPRO=/opt/devkitpro-release \
+  "$WINE_NX_DEVKIT_IMAGE" sh horizon-wine/build-boot-bundle.sh
+
+export WINE_NX_FEX=1 WINE_NX_DXVK=1 WINE_NX_VKD3D=1
+sh horizon-wine/build-amd64-components.sh
+```
+
+The component script runs Wine's `configure` and `make include/all`, fetches
+Box64 and FFmpeg at their pinned revisions, and builds the CMake target
+`wine-nx-runtime-nro` in Docker. The output is
+`horizon-wine/build-switch-amd64/wine-nx-runtime.nro`. “AMD64” names the
+Windows guest architecture. The Switch executable is AArch64.
+
+### 4. Package and verify the SD-card ZIP
+
+The component script already runs the first command below. To repackage an
+existing NRO after editing the packager, start here with `WINE_NX_LLVM_MINGW`
+set as above. The second command rebuilds the staging directory, compiles the
+setup programs and checks them against the pinned DLL repository.
+
+```sh
+python3 horizon-wine/tools/package-amd64.py --fex --vulkan --dxvk --vkd3d
+python3 horizon-wine/tools/package-autorun.py
+```
+
+Check the **finished archive** in a fresh directory. This checks ZIP CRCs,
+runs the repository verifier on the extracted files, compares the extracted
+tree to the staged tree, and compares the packaged NRO to the compiler output.
+
+```sh
+nro=horizon-wine/build-switch-amd64/wine-nx-runtime.nro
+zip=horizon-wine/build-autorun/autorun-258.zip
+unzip -tq "$zip"
+(
+  unpacked=$(mktemp -d)
+  trap 'rm -rf "$unpacked"' EXIT
+  unzip -q "$zip" -d "$unpacked"
+  python3 horizon-wine/tools/verify-package.py "$unpacked/switch/wine" \
+    --dlls horizon-dlls/switch/wine
+  diff -qr horizon-wine/build-autorun/sd-card "$unpacked"
+  cmp "$nro" "$unpacked/switch/wine/wine-nx-runtime.nro"
+)
+shasum -a 256 "$nro" "$zip"
+```
+
+For a fresh installation, extract the ZIP at the SD-card root. The executable
+lands at `switch/wine/wine-nx-runtime.nro`. First set-up downloads the Windows
+DLLs. For an existing installation, follow the upgrade steps in [the install
+guide](docs/INSTALL.md).
+
+**Reference artifacts, 2026-11-21.** The extracted package passed verification.
+Hardware testing of this Mac build is pending. These hashes identify the
+recorded files. ZIP entry timestamps can change the hash of a later build.
+
+| File | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `wine-nx-runtime.nro` | 43,936,578 | `147ce59da6e3df0495816f7ef4432a606b59fb04f27c21bec3f5f5e1db65cbaf` |
+| `autorun-258.zip` | 17,014,120 | `a94ead6c161c7eae090065d0ce23874478f6eba38f380963f3005cfbdc9dd1e4` |
+
+## Historical upstream baseline on Linux/WSL
 
 Baseline revision: `91107d45eb3204ff80d3637bfa37cefd021a3a1c`.
 
@@ -21,7 +165,7 @@ Status: baseline NRO and ZIP built successfully on 2026-09-30. Upstream package
 verification and ZIP integrity checks passed. **Hardware validation is pending**;
 the full host test suite also has the failures documented below.
 
-## Host versus target
+### Host versus target
 
 The target is Nintendo Switch/Horizon, not Linux. Linux/macOS runs the build
 tools; devkitA64 cross-compiles the native Switch executable inside Docker.
@@ -42,7 +186,7 @@ sudo docker info
 Use a shell authorized to access Docker. That access is effectively root-level
 access on the build host; it is not required on the game console.
 
-## Sources and dependencies
+### Sources and dependencies
 
 Prefer a Linux filesystem checkout with LF line endings and a path without spaces.
 Windows Git's automatic CRLF conversion can make `sh build.sh` fail with
@@ -75,7 +219,7 @@ to obtain the unchanged runtime package. `--x86` selects the optional upstream
 x86 runtime; it is not the default baseline. Avoid `--clean` during investigation
 unless the generated build directories are expendable.
 
-## Outputs and evidence
+### Outputs and evidence
 
 The expected native artifact is
 `horizon-wine/build-switch-amd64/wine-nx-runtime.nro`; packaging writes
@@ -89,7 +233,7 @@ and ZIP. Run the upstream package verification. Hardware validation remains a
 separate step: launch the baseline, open the existing library and run a previously
 working manually added game. Existing logs are under `sdmc:/switch/wine/logs`.
 
-## Current observations
+### Current observations
 
 - First attempt: Windows CRLF checkout caused shell failure before compilation.
 - Checkout normalization: restore exact upstream bytes for data files that
@@ -113,7 +257,7 @@ working manually added game. Existing logs are under `sdmc:/switch/wine/logs`.
   cross-filesystem overhead and spaces in the host build path. The editable
   feature checkout remains `D:\autorun fork\autorun`.
 
-### Host test caveats
+#### Host test caveats
 
 Linux host-test compilation also needs `-lm` for the SVG test and an explicit
 `stdint.h` include in the SteamGridDB client for `SIZE_MAX`. These are build
@@ -131,7 +275,7 @@ of the expected `1`. Therefore the full launcher smoke suite also remains failin
 No launch/input/runtime changes were made to conceal or fix this unrelated
 baseline behavior. Keep this distinction when comparing future Steam changes.
 
-### Pinned image defect
+#### Pinned image defect
 
 The pinned amd64 image cannot link the baseline NRO: its `libvulkan.a` contains
 656 AArch64 and 695 x86-64 ELF members. Link fails at operation 349/351 with
@@ -173,7 +317,7 @@ libwslay-dev libmbedtls-dev zlib1g-dev libminizip-dev liblzma-dev libzstd-dev
 libpng-dev libturbojpeg0-dev`. The artwork module reuses Autorun's existing PNG/JPEG
 decoder and SDL UI; no additional Switch dependency was added.
 
-## Baseline artifact record (2026-09-30)
+### Baseline artifact record (2026-09-30)
 
 Artifacts and logs are saved in `../artifacts/baseline/` in this workspace.
 

@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from zipfile import ZipFile, ZIP_DEFLATED
+from runtime_features import has_switch_vulkan_driver
 
 horizon_wine = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -69,7 +70,7 @@ if enabled('WINE_NX_LSFG') and args.vulkan:
         parser.error('The NRO has no LSFG-VK support; rebuild it first')
 mesa_revision = None
 if args.vulkan:
-    if b'a Vulkan surface has the screen' not in nro.read_bytes():
+    if not has_switch_vulkan_driver(nro.read_bytes()):
         parser.error('The NRO has no mesa-switch Vulkan display driver')
     mesa_revision = switch_dev['mesa_switch']
 if args.stage_output:

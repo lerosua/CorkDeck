@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+from runtime_features import has_switch_vulkan_driver
 
 horizon_wine = Path(__file__).resolve().parents[1]
 root = horizon_wine.parent
@@ -391,7 +392,7 @@ if args.x86:
     # dies with "Failed to create Vulkan instance".
     nro = horizon_wine / 'build-switch-wow64-mesa-switch/wine-nx-runtime.nro'
     assert nro.is_file(), f'{nro} is missing; build it with build-x86.sh'
-    assert b'a Vulkan surface has the screen' in nro.read_bytes(), \
+    assert has_switch_vulkan_driver(nro.read_bytes()), \
         f'{nro} has no Vulkan display driver; it is not the mesa-switch build'
     assert f'nx-wow64-dynarec-{marker}'.encode() + b'\0' in nro.read_bytes(), \
         f'{nro} is stale; rebuild the runtime for build {marker}'
