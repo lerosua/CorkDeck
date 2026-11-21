@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 void wine_nx_runtime_trace(const char *s){puts(s);}
-static int mode,install_calls;
+static int mode,install_calls,resume_calls;
 static char installed_language[32];
 int steam_provider_inspect(struct steam_provider *p,uint32_t app){(void)p;(void)app;return 1;}
 void steam_provider_app_status(struct steam_provider *p,struct steam_app_view *v){(void)p;*v=(struct steam_app_view){.app_id=123,.state=2,.windows=1,.size=250u*1048576,.language_missing=mode==18,.available_languages=steam_language_mask("russian")|STEAM_LANGUAGE_BASE};}
@@ -29,10 +29,10 @@ void steam_provider_language_preference(struct steam_provider *p,char out[32]){s
 int steam_provider_set_language(struct steam_provider *p,const char *s){(void)p;(void)s;return 1;}
 unsigned int steam_provider_concurrency(struct steam_provider *p){(void)p;return 2;}
 int steam_provider_set_concurrency(struct steam_provider *p,unsigned int n){(void)p;(void)n;return 1;}
-void steam_provider_session_status(struct steam_provider *p,struct steam_session_view *v){(void)p;*v=(struct steam_session_view){.present=mode==6};}
+void steam_provider_session_status(struct steam_provider *p,struct steam_session_view *v){(void)p;*v=(struct steam_session_view){.present=mode==6||mode==22||mode==23,.automatic=mode==22||mode==23};}
 int steam_provider_save_session(struct steam_provider *p,const char *s){(void)p;(void)s;return 1;}
 int steam_provider_save_automatic_session(struct steam_provider *p){(void)p;return 1;}
-int steam_provider_resume_session(struct steam_provider *p){(void)p;return 1;}
+int steam_provider_resume_session(struct steam_provider *p){(void)p;++resume_calls;return 1;}
 int steam_provider_unlock_session(struct steam_provider *p,const char *s){(void)p;(void)s;return 1;}
 int steam_provider_set_root(struct steam_provider *p,const char *r){(void)p;(void)r;return 1;}
 int steam_provider_refresh_library(struct steam_provider *p){(void)p;return 1;}
@@ -63,11 +63,22 @@ int steam_provider_login(struct steam_provider *p,const char *a,const char *b){(
 int steam_provider_login_qr(struct steam_provider *p){(void)p;return 1;}
 int steam_provider_guard(struct steam_provider *p,const char *c){(void)p;(void)c;return 1;}
 void steam_provider_status(struct steam_provider *p,struct steam_status_view *s)
-{(void)p;*s=(struct steam_status_view){.state=mode==6?STEAM_OFFLINE:mode?STEAM_ONLINE:STEAM_CONFIRM_DEVICE,.steam_id=UINT64_C(76561198000000000)};}
+{
+    (void)p;
+    *s=(struct steam_status_view){.state=mode==6?STEAM_OFFLINE:mode?STEAM_ONLINE:STEAM_CONFIRM_DEVICE,.steam_id=UINT64_C(76561198000000000)};
+    if(mode==22 || mode==23)s->state=mode==23 && !resume_calls?STEAM_ERROR:STEAM_CONNECTING;
+}
 void steam_provider_challenge(struct steam_provider *p,char out[512])
 {(void)p;strcpy(out,mode?"":"https://s.team/q/1/12345");}
 static void capture(SDL_Renderer *renderer)
 {
+    if(mode==22 || mode==23){
+        SDL_Event event={.type=SDL_KEYDOWN};
+        ++frames;
+        event.key.keysym.sym=frames<=2?SDLK_RETURN:SDLK_ESCAPE;
+        SDL_PushEvent(&event);
+        return;
+    }
     if(mode>=15&&mode<=19){
         SDL_Event e={.type=SDL_KEYDOWN};++frames;
         if((mode==16 || mode==18 || mode==19) && frames==1){e.key.keysym.sym=mode==16?SDLK_DOWN:SDLK_RETURN;SDL_PushEvent(&e);return;}
@@ -156,6 +167,10 @@ int main(int argc,char **argv)
       snprintf(path,sizeof(path),"%s/drive_c/Steam",argv[4]);mkdir(path,0700);
       snprintf(path,sizeof(path),"%s/drive_c/Steam/Synthetic 123",argv[4]);mkdir(path,0700);
       assert(!steam_prerequisites_ui(&ui,argv[4],123,NULL,&a));
+    }
+    else if(mode==22 || mode==23){
+        steam_ui_sign_in(&ui,argv[4]);
+        assert(frames>=3 && resume_calls==(mode==23));
     }
     else if(mode==7){assert(steam_ui_language_picker(&ui,"english")==30);}
     /* Export and the LAN view are there in developer mode only. */

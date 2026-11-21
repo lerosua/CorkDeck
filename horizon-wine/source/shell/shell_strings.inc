@@ -205,6 +205,7 @@ static const char *const shell_strings[][APP_LANG_COUNT] =
     { "Not signed in", "Вход не выполнен", "未登录" },
     { "Steam connection cancelled.", "Подключение к Steam отменено.", "已取消连接 Steam。" },
     { "Steam connection closed or network I/O failed.", "Соединение со Steam закрыто или сеть не отвечает.", "Steam 连接已关闭，或网络读写失败。" },
+    { "The Steam server directory timed out. Press A to retry.", "Истекло время ожидания списка серверов Steam. Нажмите A для повтора.", "获取 Steam 服务器列表超时。请在右侧按 A 重试。" },
     { "No internet connection. Check the console's Wi-Fi and try again.", "Нет подключения к интернету. Проверьте Wi-Fi консоли и повторите.", "无互联网连接。请检查主机 Wi-Fi 后重试。" },
     { "Secure connection to Steam failed. Check the console's date and time.", "Не удалось установить защищённое соединение со Steam. Проверьте дату и время консоли.", "无法安全连接 Steam。请检查主机日期和时间。" },
     { "Steam is not answering correctly right now. Try again later.", "Steam сейчас отвечает неправильно. Повторите позже.", "Steam 当前响应异常，请稍后重试。" },

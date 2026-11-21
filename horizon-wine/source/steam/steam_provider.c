@@ -135,6 +135,7 @@ static int run(void *opaque)
         state(p,STEAM_AUTHENTICATING,0,0,0);
         error=p->restore==2?steam_session_load_automatic(p->root,auth):steam_session_load(p->root,p->vault_pass,auth);
         steam_secret_clear(p->vault_pass,sizeof(p->vault_pass));
+        network_diag("stage=steam.session.load automatic=%d error=%u",p->restore==2,error);
         if(error)goto done;
     }
 connect:
@@ -210,6 +211,7 @@ authenticated:
         steam_secret_clear(p->vault_pass, sizeof(p->vault_pass));}
         SDL_UnlockMutex(p->mutex);
         if(save){unsigned int e=save==2?steam_session_save_automatic(p->root,auth):steam_session_save(p->root,vault_pass,auth);steam_secret_clear(vault_pass,sizeof(vault_pass));
+            network_diag("stage=steam.session.save automatic=%d error=%u",save==2,e);
             SDL_LockMutex(p->mutex);p->vault.error=e;p->vault.saving=0;p->vault.present=steam_session_present(p->root);p->vault.automatic=steam_session_automatic(p->root);SDL_UnlockMutex(p->mutex);
             if(!connection_tick(p))goto done;
         }

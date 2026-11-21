@@ -8,6 +8,7 @@
 #include "../diagnostics/lan_log.h"
 #include "../../vendor/qrcodegen/qrcodegen.h"
 #include "../launcher_ui.h"
+#include <curl/curl.h>
 #include <stdio.h>
 #include <string.h>
 #ifdef __SWITCH__
@@ -93,6 +94,10 @@ static const char *error_text(unsigned int code)
     default:return "Steam operation failed. See steam-diagnostic.log for the failed stage.";
     }
 }
+static int can_start_sign_in(enum steam_status state)
+{
+    return state == STEAM_OFFLINE || state == STEAM_ERROR;
+}
 static void session_action(struct ui *ui,int save)
 {
     char pass[128]={0},confirm[128]={0};
@@ -108,7 +113,11 @@ static void session_action(struct ui *ui,int save)
             "the SD card cannot unlock it. Other privileged homebrew on this "
             "console can access it. Logout deletes the saved session.","Enable"))return;
     }else{
-        struct steam_session_view v;steam_provider_session_status(provider,&v);
+        struct steam_session_view v;
+        struct steam_status_view auth;
+        steam_provider_status(provider,&auth);
+        steam_provider_session_status(provider,&v);
+        if(!v.present || !can_start_sign_in(auth.state))return;
         if(v.automatic){
             if(!steam_provider_resume_session(provider))ui_message(ui,"Steam session","Could not reconnect saved session.");
             return;
@@ -451,6 +460,9 @@ static void form_field(struct ui *ui,int y,const char *label,const char *value,i
 }
 static void request_qr(const char *trigger)
 {
+    struct steam_status_view auth;
+    steam_provider_status(provider,&auth);
+    if(!can_start_sign_in(auth.state))return;
     network_diag( "stage=steam.qr.start trigger=%s", trigger );
     if(!steam_provider_login_qr(provider))network_diag( "stage=steam.qr.start accepted=0" );
 }
@@ -537,7 +549,7 @@ void steam_ui_open(struct ui *ui,const char *root)
             int title_h=TTF_FontHeight(ui->normal);
             /* Left: the account's name and password. Right: the code for the phone. */
             ui_rounded(ui,80,120,590,440,8,panel);
-            ui_text(ui,ui->normal,108,144,vault.present?"Unlock saved Steam session (+)":"Sign in to Steam",ui->value);
+            ui_text(ui,ui->normal,108,144,"Sign in to Steam",ui->value);
             ui_text(ui,ui->small,108,144+title_h+8,"With the account's name and password",ui->dim);
             form_field(ui,240,"ACCOUNT NAME",account[0]?account:"Select to enter your Steam login",selected==0,account[0]!=0);
             form_field(ui,335,"PASSWORD",password[0]?"********":"Select to enter your password",selected==1,password[0]!=0);
@@ -556,9 +568,13 @@ void steam_ui_open(struct ui *ui,const char *root)
             }else{
                 ui_rounded(ui,830,206,240,240,8,(SDL_Color){33,44,58,255});
                 if(selected==3)ui_outline(ui,827,203,246,246,10,3,blue);
-                ui_text_wrapped(ui,ui->normal,950,290,208,3,vault.present?"Unlock saved session":challenge[0]?"QR cannot be displayed. Use password.":"Generate QR code",ui->value,1);
+                const char *action;
+                if(!can_start_sign_in(view.state))action=status_text(view.state);
+                else if(vault.present)action=vault.automatic?"Reconnect saved session":"Unlock saved session";
+                else action=challenge[0]?"QR cannot be displayed. Use password.":"Generate QR code";
+                ui_text_wrapped(ui,ui->normal,950,290,208,3,action,ui->value,1);
             }
-            ui_text_wrapped(ui,ui->small,950,476,440,3,vault.present?"Unlock with your LOCAL vault passphrase. X deletes the saved session.":"Scan with the Steam mobile app and confirm sign in.",ui->dim,1);
+            ui_text_wrapped(ui,ui->small,950,476,440,3,vault.automatic?"Automatic sessions reconnect at startup. Passphrase sessions require local unlock.":vault.present?"Unlock with your LOCAL vault passphrase. X deletes the saved session.":"Scan with the Steam mobile app and confirm sign in.",ui->dim,1);
         }else{
             ui_rounded(ui,80,120,1120,300,8,panel);
             ui_rounded(ui,108,152,12,12,6,ui->success);
@@ -570,7 +586,11 @@ void steam_ui_open(struct ui *ui,const char *root)
             ui_text(ui,ui->small,108,372,"Press X to log out of this session.",ui->dim);
         }
         if(view.state!=STEAM_ONLINE)ui_text(ui,ui->small,104,578,status_text(view.state),ui->text);
-        if(view.error){snprintf(info,sizeof(info),"Error %u (stage %u, CM %u): %s",view.error,view.failed_stage,view.cm_type,ui->translate?ui->translate(error_text(view.error)):error_text(view.error));ui_text_wrapped(ui,ui->small,104,604,1060,2,info,ui->danger,0);}
+        if(view.error){
+            const char *reason=view.error==102 && view.transport_error==CURLE_OPERATION_TIMEDOUT
+                ? "The Steam server directory timed out. Press A to retry."
+                : error_text(view.error);
+            snprintf(info,sizeof(info),"Error %u (stage %u, CM %u): %s",view.error,view.failed_stage,view.cm_type,ui->translate?ui->translate(reason):reason);ui_text_wrapped(ui,ui->small,104,604,1060,2,info,ui->danger,0);}
         else if(vault.error){snprintf(info,sizeof(info),"Session storage error %u: %s",vault.error,ui->translate?ui->translate(error_text(vault.error)):error_text(vault.error));ui_text_fit(ui,ui->small,104,604,1060,info,ui->danger,0);}
         else ui_text_fit(ui,ui->small,104,604,1060,vault.saving?"Encrypting local session...":vault.present?"Encrypted local session saved. + saves/reconnects/unlocks; X deletes it.":"Session is in memory. + saves an encrypted session (automatic or passphrase).",ui->dim,0);
         if(!saved)ui_text(ui,ui->small,104,630,"Could not write logs/steam-diagnostic.log",ui->danger);
@@ -625,8 +645,7 @@ void steam_ui_game(struct ui *ui,const char *root,const struct steam_game *game,
     if(!provider){ui_message(ui,"Steam","Unable to create provider.");return;}
     steam_library_ui_game(ui,provider,root,game,&launcher,art);
 }
-/* The shortest way to being signed in: the saved session when there is one,
- * the sign-in screen (QR first) when there is not. */
+/* Show the active attempt when startup is already restoring the session. */
 void steam_ui_sign_in(struct ui *ui,const char *root)
 {
     struct steam_session_view vault;struct steam_status_view v;
@@ -635,8 +654,7 @@ void steam_ui_sign_in(struct ui *ui,const char *root)
     steam_provider_status(provider,&v);steam_provider_session_status(provider,&vault);
     network_diag( "stage=steam.sign_in state=%u saved_session=%d", (unsigned)v.state, !!vault.present );
     if(v.state==STEAM_ONLINE){steam_ui_settings(ui,root);return;}
-    if(vault.present)session_action(ui,0);
-    else steam_ui_open(ui,root);
+    steam_ui_open(ui,root);
 }
 /* At start: a session saved for this console signs in by itself. */
 void steam_ui_autoresume(const char *root)

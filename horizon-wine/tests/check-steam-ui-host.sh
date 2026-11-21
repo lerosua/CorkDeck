@@ -38,6 +38,8 @@ export SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy
 "$build/ui" "$root/../fonts/tahoma.ttf" "$build/download-language.bmp" 19 "$build"
 "$build/ui" "$root/../fonts/tahoma.ttf" "$build/integrity-failure.bmp" 20 "$build"
 "$build/ui" "$root/../fonts/tahoma.ttf" "$build/prerequisites.bmp" 21 "$build"
+"$build/ui" "$root/../fonts/tahoma.ttf" "$build/unused.bmp" 22 "$build"
+"$build/ui" "$root/../fonts/tahoma.ttf" "$build/unused.bmp" 23 "$build"
 if [ -n "${STEAM_UI_SHOTS:-}" ]; then
     mkdir -p "$STEAM_UI_SHOTS"
     cp "$build"/*.bmp "$STEAM_UI_SHOTS/"
