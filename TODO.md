@@ -2,14 +2,12 @@
 
 ## Switch 上的 Electron 独立 renderer（暂缓）
 
-2026-11-21 在 Switch 测试 ElectronProbe 和《黑暗笔录》时，两者的双向启动管道、`new_process` 和初始线程登记均成功。Wine 分配的 PID/TID 分别为 `104/108` 和 `136/140`。两者都在 `spawn_process` 调用 `fork()` 时得到 `ENOSYS`（`host_errno=88`），Wine 返回 `0xc0000002`，`host_child_pid=0`。探针创建了可见窗口，随后报告 `renderer-gone: launch-failed`；两者均未画出游戏首帧。
+**暂停独立 renderer 开发和上机复测。** 2026-11-21 的 ElectronProbe 实测确认 Horizon 能启动独立 SystemModule，但该子进程的堆装不下当前 Wine NRO。恢复这项工作的前提是先证明有足够的内存装载 Wine，并给 Electron renderer 留出运行空间。
 
-同一份 `habl.exe` 在 Mac Wine Staging 下启动了独立 renderer，随后因 Windows Steam 客户端未运行而退出。主菜单与首个场景的交互仍待验证。[Mac Wine 实测记录](docs/research/DARK_NOTES_MAC_WINE_20261121.md)
-
-- [ ] **先取得可玩的对照结果。** 在运行着已登录 Windows Steam 客户端的 Wine 环境中，用同一份游戏进入主菜单，点击第一处可交互场景并记录画面变化。届时再决定是否开发 Switch 子程序。
-- [ ] **验证 Horizon 能同时运行父子进程。** 用可单独移除的最小子程序测试启动方式。分别记录启动返回码、父子两端读取的 Horizon PID 和退出结果，确认父进程持续运行、子进程可回收，并测量 4 GiB Switch 上启动前后的内存余量。子程序的打包和安装方式待验证。
-- [ ] **验证子进程能接回父进程的 Wine 会话。** 现有 Wine 句柄表和 Mojo 管道缓冲区位于父进程内。需要通过 Horizon 跨进程通信传递启动参数和继承句柄，让子进程接入对应的 Wine 进程与初始线程，并用 ElectronProbe 验证 Mojo 两端各完成一次发送和接收。
-- [ ] **验证真实 renderer 和游戏交互。** 由子程序加载游戏的 `--type=renderer` 入口。先验证 ElectronProbe 显示首帧并响应输入，再测《黑暗笔录》的 Steam 初始化、主菜单和第一处交互。
+- [x] 同一份《黑暗笔录》在 Mac Wine Staging 中登录 Windows Steam 后能进入主菜单，并完成幸福商城入口的首次交互。Switch 当前版本启动黑屏。[双平台实测记录](docs/research/DARK_NOTES_MAC_WINE_20261121.md)
+- [x] 在原有 Wine 路径中，探针和游戏均在 `fork()` 遇到 `ENOSYS`。改用独立 SystemModule 后，探针的 `pmshellLaunchProgram` 返回 `0x0`，父进程 PID 为 `252`，返回的子进程 PID `253` 与 loader 自查一致。
+- **内存卡点。** 系统报告给 PID 253 的总量为 12,181,504 字节，已用 1,171,456 字节，剩余 10.50 MiB。留出 2 MiB 并按 2 MiB 向下对齐后得到 8 MiB。旧策略在这个数值下不会触发 96 MiB 预留；本轮实际申请并获准 8 MiB，返回 `0x0`。
+- **停止位置。** Wine NRO 的映像加 BSS 就需要 90,316,800 字节（86.13 MiB），比获准的堆多 78.13 MiB。loader 在映像容量检查处返回 `0xD5B` 并退出。探针只创建了主窗口，子进程未进入 Wine，Mojo 双向通信和紫绿首帧均未完成。
 
 ## Proton 移植与逐游戏运行时选择
 
