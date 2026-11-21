@@ -2,7 +2,7 @@
 
 **Play Windows PC games and your Steam library on a Nintendo Switch.**
 
-[简体中文](readme.cn) · [Русский](README.ru.md) · [Download](https://github.com/plv890/CorkDeck/releases/latest) · [Installation](docs/INSTALL.md) · [Compatibility](docs/COMPATIBILITY.md) · [Credits](CREDITS.md)
+[简体中文](readme.cn.md) · [Русский](README.ru.md) · [Download](https://github.com/plv890/CorkDeck/releases/latest) · [Installation](docs/INSTALL.md) · [Compatibility](docs/COMPATIBILITY.md) · [Credits](CREDITS.md)
 
 ![CorkDeck game library on a Nintendo Switch, with Steam games installed](docs/screenshots/library.jpg)
 
