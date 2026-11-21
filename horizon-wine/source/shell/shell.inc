@@ -260,17 +260,18 @@ static void sh_global_load( struct launcher *l )
 static void sh_apply_global( struct launcher *l )
 {
     struct app_settings s;
-    int language;
+    const char *code;
 
     app_settings_resolve( &s, &sh.global, NULL, NULL, NULL, NULL );
-    language = app_settings_get( &s, APP_SET_LANGUAGE );
-    if (language == 1) sh.language = APP_LANG_EN;
-    else if (language == 2) sh.language = APP_LANG_RU;
-    else sh.language = !strncmp( nx_system_language().console, "ru", 2 ) ? APP_LANG_RU : APP_LANG_EN;
+    code = app_setting_def( APP_SET_LANGUAGE )->choices[app_settings_get( &s, APP_SET_LANGUAGE )].value;
+    if (!strcmp( code, "system" ))
+    {
+        code = nx_system_language().console;
 #ifndef __SWITCH__
-    if (language == 0 && getenv( "CORKDECK_LANGUAGE" ))
-        sh.language = !strcmp( getenv( "CORKDECK_LANGUAGE" ), "ru" ) ? APP_LANG_RU : APP_LANG_EN;
+        if (getenv( "CORKDECK_LANGUAGE" )) code = getenv( "CORKDECK_LANGUAGE" );
 #endif
+    }
+    sh.language = shell_language_from_code( code );
     shell_language = sh.language;
     if (sh.developer && app_settings_get( &s, APP_SET_DEVELOPER ) <= 0) lan_log_stop();
     sh.developer = app_settings_get( &s, APP_SET_DEVELOPER ) > 0;
@@ -3520,16 +3521,12 @@ static int shell_run( struct launcher *l, char *target, size_t size )
     struct ui *ui = &l->ui;
     struct ui_input input;
 
-    memset( &sh, 0, sizeof(sh) );
-    sh_global_load( l );
-    sh_apply_global( l );
-    ui->translate = shell_translate;
     ui->note_clock = sh_note_clock;
     sh.page = l->history_count ? PAGE_HOME : PAGE_LIBRARY;
     sh.pending = -1;
     ui->trace = wine_nx_runtime_trace;
     launcher_log( "[SHELL] started: %d programs, language %s, Windows DLLs %s", l->program_count,
-                  sh.language == APP_LANG_RU ? "ru" : "en", launcher_dlls_is_ready( l->dlls ) ? "ready" : "not ready" );
+                  app_setting_def( APP_SET_LANGUAGE )->choices[sh.language + 1].value, launcher_dlls_is_ready( l->dlls ) ? "ready" : "not ready" );
     launcher_start_screen = sh_start_screen;
     ui->global_key = sh_list_key;
     ui->global_data = l;

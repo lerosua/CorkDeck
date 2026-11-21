@@ -17,7 +17,7 @@ CorkDeck is experimental. Some games run, many do not yet, and performance depen
 
 ## Screenshots
 
-Unedited captures from a Nintendo Switch running CorkDeck 0.2. The interface comes in English and Russian.
+Unedited captures from a Nintendo Switch running CorkDeck 0.2. The current interface supports English, Russian and Simplified Chinese.
 
 | | |
 | --- | --- |
@@ -64,7 +64,7 @@ CorkDeck keeps Autorun's runtime, the part that actually executes Windows code, 
 - Settings where **every option explains its purpose and its possible effect**, and shows where the current value comes from: the default, the global settings or the game's own profile. One button resets it.
 - The main menu on **−** and a status panel on **+** from any screen; notifications in a corner instead of blocking windows.
 - A launch screen with the game's artwork that stays until the game draws its first frame, and windows of launchers and configuration tools that remain visible before rendering starts.
-- English and Russian interface, with a new typeface (Manrope).
+- English, Russian and Simplified Chinese menus. Settings → Interface → Language follows the console by default and also accepts a manual choice.
 - After a game exits, you are back in the shell.
 
 **Steam**

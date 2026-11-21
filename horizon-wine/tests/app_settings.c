@@ -270,7 +270,7 @@ static void layers( void )
     assert( app_settings_get( &s, APP_SET_WINDOWS ) == 1 && app_settings_get( &s, APP_SET_VERBOSE ) == 1 );
 }
 
-/* Every setting can be shown: a name, a purpose and labels in both languages. */
+/* Every setting can be shown: a name, a purpose and labels in every language. */
 static void table( void )
 {
     int id, language, choice;
@@ -286,7 +286,7 @@ static void table( void )
         {
             assert( def->name[language] && def->name[language][0] );
             assert( def->purpose[language] && def->purpose[language][0] );
-            assert( !def->impact[0] == !def->impact[1] );
+            assert( !def->impact[0] == !def->impact[language] );
             for (choice = 0; choice < def->choice_count; choice++)
                 assert( def->choices[choice].label[language] && def->choices[choice].label[language][0] );
         }

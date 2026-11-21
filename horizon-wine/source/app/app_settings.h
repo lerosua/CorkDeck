@@ -14,7 +14,7 @@
  * that applies, the layer it came from and, when a stronger layer overrode a
  * choice, why. The table also carries what a person needs to decide: what the
  * setting is for and what it can cost in speed, memory, stability or
- * compatibility, in English and Russian.
+ * compatibility, in each interface language.
  *
  * This module reads no files of its own accord and draws nothing: the caller
  * hands it the layers it has read. The formats on the card are the ones the
@@ -28,7 +28,7 @@
 struct wine_nx_config;
 struct launcher_kv;
 
-enum app_language { APP_LANG_EN, APP_LANG_RU, APP_LANG_COUNT };
+enum app_language { APP_LANG_EN, APP_LANG_RU, APP_LANG_ZH_CN, APP_LANG_COUNT };
 
 enum app_setting
 {

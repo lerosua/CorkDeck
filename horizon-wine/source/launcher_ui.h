@@ -203,6 +203,7 @@ SDL_Texture *ui_sheen( struct ui *ui );
 SDL_Texture *ui_svg_texture( struct ui *ui, const char *d, float view_x, float view_y, float view_w, float view_h,
                              int size );
 
+const char *ui_translate( struct ui *ui, const char *text );
 int  ui_text_width( struct ui *ui, TTF_Font *font, const char *text );
 void ui_text( struct ui *ui, TTF_Font *font, int x, int y, const char *text, SDL_Color color );
 void ui_text_centered( struct ui *ui, TTF_Font *font, int cx, int y, const char *text, SDL_Color color );

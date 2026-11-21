@@ -48,7 +48,6 @@ enum glyph
 static char last_error[256];
 static int window_created;
 
-static const char *ui_translate( struct ui *ui, const char *text );
 
 #include <stdarg.h>
 
@@ -992,7 +991,7 @@ float ui_highlight( struct ui *ui, float target_y )
     return ui->highlight;
 }
 
-static const char *ui_translate( struct ui *ui, const char *text )
+const char *ui_translate( struct ui *ui, const char *text )
 {
     return ui->translate && text ? ui->translate( text ) : text;
 }

@@ -18,7 +18,7 @@ The fork's code and documentation were written mainly by AI coding agents (OpenA
 
 Wine, FEX, Box64, Mesa and mesa-switch, DXVK, VKD3D-Proton, libnx and devkitPro, Atmosphère, Hekate, Horizon OC, and the other components listed in [NOTICES.md](NOTICES.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The existing `AUTHORS` file, copyright statements and licence files remain authoritative for each of them.
 
-The interface typeface is Manrope, under the SIL Open Font License.
+The interface font combines Manrope and Chinese glyphs from Noto Sans SC. Both are distributed under the SIL Open Font License. [Manrope licence](horizon-wine/assets/fonts/Manrope-OFL.txt) · [Noto Sans SC licence](horizon-wine/assets/fonts/NotoSansSC-OFL.txt)
 
 The local Steamworks compatibility library is a limited local implementation built against compatibility headers recorded at GBE revision `7103add7ca6ef3ef8353279219880068f2494fc8`. It is not Valve's library and not a full Steam implementation. Its sources are in [horizon-wine/assets/steamworks/source](horizon-wine/assets/steamworks/source).
 

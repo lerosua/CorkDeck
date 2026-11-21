@@ -7,7 +7,11 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build=$(mktemp -d)
 trap 'rm -rf "$build"' EXIT HUP INT TERM
 python3 "$root/tools/make-embed.py" "$build/icon.c" wine_nx_icon_any "$root/assets/autorun.jpg" \
-    corkdeck_font "$root/assets/fonts/Manrope-SemiBold.ttf"
+    corkdeck_font "$root/assets/fonts/CorkDeckUI.ttf"
+clang -std=gnu11 -Wall -Wextra -Werror $(sdl2-config --cflags) \
+    "$root/tests/chinese_menu.c" "$root/source/app/app_settings.c" \
+    $(sdl2-config --libs) -lSDL2_ttf -o "$build/chinese-menu"
+"$build/chinese-menu" "$root/assets/fonts/CorkDeckUI.ttf"
 # What both programs are made of: everything of the shell but launcher.c, which
 # the adapter's own test stands in for.
 common="$build/icon.c $root/vendor/qrcodegen/qrcodegen.c $root/source/diagnostics/lan_log.c"

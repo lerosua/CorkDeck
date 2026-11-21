@@ -2733,7 +2733,11 @@ int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target
         extern const unsigned char corkdeck_font[];
         extern const size_t corkdeck_font_size;
 
-        if (ui_init( &l->ui, corkdeck_font, corkdeck_font_size, 1 )) font = corkdeck_font;
+        if (ui_init( &l->ui, corkdeck_font, corkdeck_font_size, 1 ))
+        {
+            font = corkdeck_font;
+            font_size = corkdeck_font_size;
+        }
     }
     if (!font && (!launcher_platform_font( &font, &font_size ) ||
         !ui_init( &l->ui, font, font_size, 1 )))
@@ -2820,6 +2824,10 @@ int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target
         steam_ui_set_launcher( &adapter );
         steam_ui_prepare( options->runtime_dir );
     }
+    memset( &sh, 0, sizeof(sh) );
+    sh_global_load( l );
+    sh_apply_global( l );
+    l->ui.translate = shell_translate;
     offer_quick_setup( l );
     if (options->launch_error) ui_message( &l->ui, "Game unavailable", options->launch_error );
     ret = l->ui.running ? shell_run( l, target, target_size ) : 0;

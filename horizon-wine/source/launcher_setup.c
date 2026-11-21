@@ -81,10 +81,11 @@ static int run_job(struct ui *ui, struct setup_job *job)
 static int confirm_install(struct ui *ui, const struct wine_nx_launcher_options *options)
 {
     char message[384];
-    snprintf(message, sizeof(message), "This installs CorkDeck on the HOME menu. Installing unofficial titles "
-             "can lead to a console ban. Use emuMMC.\n\n%s",
-             options->emummc > 0 ? "This console is on emuMMC." : options->emummc == 0 ?
-             "This console is NOT on emuMMC." : "The current emuMMC status could not be checked.");
+    const char *status = options->emummc > 0 ? "This console is on emuMMC." : options->emummc == 0 ?
+                         "This console is NOT on emuMMC." : "The current emuMMC status could not be checked.";
+    snprintf(message, sizeof(message), "%s\n\n%s",
+             ui_translate(ui, "This installs CorkDeck on the HOME menu. Installing unofficial titles can lead to a console ban. Use emuMMC."),
+             ui_translate(ui, status));
     return ui_confirm(ui, "Install CorkDeck forwarder?", message, "Install");
 }
 
@@ -214,8 +215,8 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
             notes[0] = "Select the configuration to copy";
             break;
         case STEP_ENTRY:
-            snprintf(description, sizeof(description), "Choose the entry to copy from bootloader/hekate_ipl.ini. "
-                     "CorkDeck keeps its other boot settings and uses the bundled loader, kernel and security monitor. The original is kept.%s%s",
+            snprintf(description, sizeof(description), "%s%s%s", ui_translate(ui, "Choose the entry to copy from bootloader/hekate_ipl.ini. "
+                     "CorkDeck keeps its other boot settings and uses the bundled loader, kernel and security monitor. The original is kept."),
                      entry_count ? "" : "\n\n", entry_count ? "" : detail[0] ? detail : setup_boot_error(status));
             count = (int)entry_count;
             for (int i = 0; i < count; i++) { items[i] = entries[i].name; disabled[i] = !entries[i].supported; }
@@ -233,9 +234,9 @@ int launcher_setup_run(struct ui *ui, const struct wine_nx_launcher_options *opt
             }
             else
             {
-                snprintf(description, sizeof(description), "Boot entry: %s\nLoader: %s\nHorizon OC settings: %s",
-                         job.boot.entry.name, job.boot.loader == SETUP_BOOT_HOC ? "Horizon OC" : "Stock Atmosphere",
-                         job.boot.loader != SETUP_BOOT_HOC ? "Not touched" : "Yours, carried over unchanged");
+                snprintf(description, sizeof(description), ui_translate(ui, "Boot entry: %s\nLoader: %s\nHorizon OC settings: %s"),
+                         job.boot.entry.name, ui_translate(ui, job.boot.loader == SETUP_BOOT_HOC ? "Horizon OC" : "Stock Atmosphere"),
+                         ui_translate(ui, job.boot.loader != SETUP_BOOT_HOC ? "Not touched" : "Yours, carried over unchanged"));
                 notice = manifest ? "Leave the SD card connected until installation finishes." :
                          "Patch files are not bundled yet. No boot files have been changed. Return to Quick setup when they are available.";
                 items[0] = updating ? "Update boot patches" : "Install boot patches";

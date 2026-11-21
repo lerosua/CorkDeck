@@ -69,6 +69,8 @@ for folder in ('drive_c/windows/fonts', 'share/wine/fonts'):
 licenses = stage / 'licenses'
 licenses.mkdir()
 for source, name in ((root / 'COPYING.LIB', 'Wine-LGPL-2.1.txt'),
+                     (horizon_wine / 'assets/fonts/Manrope-OFL.txt', 'Manrope-OFL.txt'),
+                     (horizon_wine / 'assets/fonts/NotoSansSC-OFL.txt', 'NotoSansSC-OFL.txt'),
                      (horizon_wine / 'vendor/box64/LICENSE', 'Box64-MIT.txt'),
                      (horizon_wine / 'licenses/libjpeg-turbo.txt', 'libjpeg-turbo.txt'),
                      (horizon_wine / 'licenses/wslay-MIT.txt', 'wslay-MIT.txt'),
