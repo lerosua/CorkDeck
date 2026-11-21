@@ -12,7 +12,8 @@ void network_diag_snapshot( const char *stage );
 static inline void network_diag_snapshot( const char *stage ) { (void)stage; }
 #endif
 
-/* Only pass local labels and numeric results, never URLs, headers or auth data. */
+/* Log only diagnostics, validated CDN hostnames and bounded public store fields.
+ * Never log request URLs, headers or auth data. */
 static inline void network_diag( const char *format, ... ) __attribute__((format(printf, 1, 2)));
 static inline void network_diag( const char *format, ... )
 {

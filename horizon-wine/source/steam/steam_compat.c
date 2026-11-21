@@ -20,25 +20,6 @@ const char *steam_compat_record(uint32_t app)
     }
 }
 
-/* Return just the value at a given level; the store also sends recommended
- * requirements and separate SteamOS/Machine ratings with similar names. */
-static int member(struct parser object, const char *name, struct parser *value)
-{
-    if (!consume(&object, '{')) return 0;
-    do {
-        char key[128];
-        if (!json_string(&object, key, sizeof(key)) || !consume(&object, ':')) return 0;
-        struct parser start = object;
-        if (!skip_value(&object)) return 0;
-        if (!strcmp(name, key)) {
-            start.end = object.p;
-            *value = start;
-            return 1;
-        }
-    } while (consume(&object, ','));
-    return 0;
-}
-
 static void plain_text(char *html)
 {
     char *out = html;
@@ -81,9 +62,9 @@ int steam_compat_parse_minimum(const char *json, size_t size, uint32_t app, stru
     int success;
     *minimum = (struct steam_minimum){0};
     snprintf(id, sizeof(id), "%u", app);
-    if (!member(root, id, &entry) || !member(entry, "success", &field) ||
-        !json_bool(&field, &success) || !success || !member(entry, "data", &data)) return 0;
-    if (!member(data, "pc_requirements", &requirements) || !member(requirements, "minimum", &field)) return 1;
+    if (!json_member(root, id, &entry) || !json_member(entry, "success", &field) ||
+        !json_bool(&field, &success) || !success || !json_member(entry, "data", &data)) return 0;
+    if (!json_member(data, "pc_requirements", &requirements) || !json_member(requirements, "minimum", &field)) return 1;
     if (!json_string(&field, html, sizeof(html))) return 0;
     plain_text(html);
     for (char *line = html; line;) {
@@ -122,14 +103,20 @@ int steam_compat_parse_minimum(const char *json, size_t size, uint32_t app, stru
     return 1;
 }
 
+const char *steam_compat_deck_rating(unsigned int category)
+{
+    static const char *const ratings[] = {"Not rated", "Unsupported", "Playable", "Verified"};
+    return category < sizeof(ratings) / sizeof(ratings[0]) ? ratings[category] : "Unknown";
+}
+
 int steam_compat_parse_deck(const char *json, size_t size, uint32_t app, unsigned int *category)
 {
     struct parser root = {(const unsigned char *)json, (const unsigned char *)json + size, 0};
     struct parser result, field;
     unsigned long long value;
-    if (!member(root, "success", &field) || !json_uint(&field, &value) || value != 1 ||
-        !member(root, "results", &result) || !member(result, "appid", &field) ||
-        !json_uint(&field, &value) || value != app || !member(result, "resolved_category", &field) ||
+    if (!json_member(root, "success", &field) || !json_uint(&field, &value) || value != 1 ||
+        !json_member(root, "results", &result) || !json_member(result, "appid", &field) ||
+        !json_uint(&field, &value) || value != app || !json_member(result, "resolved_category", &field) ||
         !json_uint(&field, &value) || value > 3) return 0;
     *category = (unsigned int)value;
     return 1;

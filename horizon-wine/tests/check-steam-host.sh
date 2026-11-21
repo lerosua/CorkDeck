@@ -19,17 +19,20 @@ $cc $flags "$root/tests/steam_directory.c" "$root/source/steam/steam_directory.c
 $cc $flags "$root/tests/steam_crypto.c" "$root/source/steam/steam_crypto.c" \
     "$root/source/steam/steam_wire.c" -lmbedcrypto -o "$build/crypto"
 "$build/crypto"
-$cc $flags -Wno-deprecated-declarations "$root/tests/steam_cm_packets.c" \
+$cc $flags -Wno-deprecated-declarations $(sdl2-config --cflags) "$root/tests/steam_cm_packets.c" \
     "$root/source/steam/steam_crypto.c" "$root/source/steam/steam_wire.c" \
     "$root/source/steam/steam_cm_message.c" "$root/source/steam/steam_probe.c" \
-    "$root/source/steam/steam_directory.c" -lcurl -lwslay -lmbedcrypto -lz -o "$build/packets"
+    "$root/source/steam/steam_directory.c" "$root/source/steam/steam_cm_route.c" "$root/source/steam/steam_file.c" $(sdl2-config --libs) -lcurl -lwslay -lmbedcrypto -lz -o "$build/packets"
 "$build/packets"
+$cc $flags $(sdl2-config --cflags) "$root/tests/steam_cm_route_host.c" "$root/source/steam/steam_cm_route.c" \
+    "$root/source/steam/steam_directory.c" "$root/source/steam/steam_file.c" $(sdl2-config --libs) -lcurl -o "$build/cm-route"
+"$build/cm-route"
 $cc $flags $(sdl2-config --cflags) "$root/tests/steam_logon.c" \
     "$root/source/steam/steam_crypto.c" "$root/source/steam/steam_wire.c" \
     "$root/source/steam/steam_cm_message.c" "$root/source/steam/steam_auth.c" \
-    "$root/source/steam/steam_library.c" \
-    "$root/source/steam/steam_family.c" "$root/source/steam/steam_settings.c" "$root/source/steam/steam_file.c" "$root/source/steam/steam_session.c" "$root/source/steam/steam_device_key.c" \
-    $(sdl2-config --libs) -lmbedcrypto -lm -o "$build/logon"
+    "$root/source/steam/steam_library.c" "$root/source/steam/steam_library_cache.c" \
+    "$root/source/steam/steam_family.c" "$root/source/steam/steam_settings.c" "$root/source/steam/steam_file.c" "$root/source/steam/steam_session.c" \
+    $(sdl2-config --libs) -lmbedcrypto -lm -lz -o "$build/logon"
 "$build/logon"
 $cc $flags "$root/tests/steam_download_formats.c" "$root/source/steam/steam_library.c" \
     "$root/source/steam/steam_app.c" "$root/source/steam/steam_settings.c" "$root/source/steam/steam_file.c" "$root/source/steam/steam_content.c" \
@@ -56,7 +59,7 @@ $cc $flags "$root/tests/steam_install_script_host.c" "$root/source/steam/steam_i
 $cc $flags -Wno-deprecated-declarations $(sdl2-config --cflags) "$root/tests/steam_install_parallel_host.c" \
     "$root/source/steam/steam_content.c" "$root/source/steam/steam_manifest.c" \
     "$root/source/steam/steam_wire.c" "$root/source/steam/steam_storage.c" "$root/source/steam/steam_engine.c" "$root/source/steam/steam_diagnostics.c" \
-    $(sdl2-config --libs) -lminizip -lmbedcrypto -llzma -lzstd -lz -o "$build/install-parallel"
+    $(sdl2-config --libs) -lcurl -lminizip -lmbedcrypto -llzma -lzstd -lz -o "$build/install-parallel"
 "$build/install-parallel"
 $cc $flags "$root/tests/steam_storage_host.c" "$root/source/steam/steam_storage.c" \
     "$root/source/steam/steam_content.c" "$root/source/steam/steam_wire.c" -lmbedcrypto -llzma -lzstd -lz -o "$build/storage"

@@ -35,6 +35,9 @@ int steam_ui_download(struct steam_download_view *);
 void steam_ui_stop(void);
 int steam_ui_restart(void);
 int steam_ui_resume(uint32_t app_id);
+struct steam_status_view;
+void steam_ui_status(struct steam_status_view *);
+unsigned int steam_ui_library_generation(void);
 int steam_ui_online(void);
 /* Whether Steam is downloading, installing or removing that game right now. */
 int steam_ui_busy(uint32_t app_id);

@@ -5,6 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../system_network.h"
+
+int steam_link_connected(void)
+{
+    enum nx_link link = nx_system_network().link;
+    if (link == NX_LINK_UNKNOWN) return -1;
+    return link != NX_LINK_DOWN && link != NX_LINK_CONNECTING;
+}
+
 #define RESPONSE_MAX 65536
 struct request {
     unsigned char *body;

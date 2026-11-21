@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "steam_install.h"
+#include "../network_diag.h"
 #include "steam_manifest.h"
+#include "steam_manifest_tls.h"
 #include "steam_engine.h"
 #include "steam_hash.h"
 #include "steam_cdn.h"
@@ -38,6 +40,7 @@ struct cdn_session {
   CURL *curl;
   struct steam_cdn *pool;
   size_t preferred;
+  int alternate_directory_tried;
   uint32_t depot;
   uint64_t started, rate_tick, rate_bytes;
   char tokens[8][1024];
@@ -212,11 +215,97 @@ static int transfer_tick(void *opaque, curl_off_t a, curl_off_t b, curl_off_t c,
   progress(t->cb, t->view);
   return !tick(t->cb);
 }
-static int fetch(const char hosts[8][128], size_t count, const char *resource,
+enum { MANIFEST_HOPS = 5, CDN_NAME_SIZE = 256 };
+
+/* REDIRECT_URL is libcurl's resolved Location (including relative redirects).
+ * Use that URL verbatim; never append the previous host's CDN token to it. */
+static int manifest_redirect(CURL *curl, const struct transfer *t, long status,
+                             unsigned hop, char host[CDN_NAME_SIZE], char *url, size_t capacity) {
+  char *location = NULL, *scheme = NULL, *target = NULL;
+  CURLU *parts = curl_url();
+  const char *reason = "invalid_location";
+  const char *name = "-";
+  int follow = 0;
+  if (parts && curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &location) == CURLE_OK && location &&
+      curl_url_set(parts, CURLUPART_URL, location, CURLU_DISALLOW_USER) == CURLUE_OK &&
+      curl_url_get(parts, CURLUPART_SCHEME, &scheme, 0) == CURLUE_OK &&
+      curl_url_get(parts, CURLUPART_HOST, &target, 0) == CURLUE_OK) {
+    /* Only the public DNS name or IP literal goes into the log. */
+    size_t n = strlen(target);
+    if (n && n < CDN_NAME_SIZE && strspn(target,
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]") == n) {
+      name = target;
+      if (strcasecmp(scheme, "https")) reason = "requires_https";
+      else if (hop >= MANIFEST_HOPS) reason = "hop_limit";
+      else if (strlen(location) >= capacity) reason = "url_too_long";
+      else {
+        strcpy(url, location);
+        follow = 1;
+        reason = "follow";
+      }
+    }
+  }
+  network_diag("stage=steam.manifest.redirect appid=%u depot=%u request=%u hop=%u http=%ld result=%s to=%s",
+               t->app, t->depot, t->view->requests, hop + 1, status, reason, name);
+  if (follow) {
+    strcpy(host, name);
+    for (char *c = host; *c; ++c)
+      if (*c >= 'A' && *c <= 'Z') *c += 'a' - 'A';
+  }
+  curl_free(target);
+  curl_free(scheme);
+  curl_url_cleanup(parts);
+  return follow;
+}
+
+/* Steam returns a query string for exactly one host. Keep the redirect's
+ * path and routing parameters byte-for-byte, replacing any stale auth keys. */
+static int manifest_token_has_key(const char *token, const char *param, size_t len) {
+  size_t key_len = strcspn(param, "=&");
+  if (key_len > len) key_len = len;
+  while (*token) {
+    if (strcspn(token, "=&") == key_len && !memcmp(token, param, key_len)) return 1;
+    token += strcspn(token, "&");
+    if (*token) ++token;
+  }
+  return 0;
+}
+
+static const char *manifest_add_auth(char *url, size_t capacity, const char *token) {
+  if (*token == '?' || *token == '&') ++token;
+  if (!*token) return "empty_token";
+  for (const unsigned char *c = (const unsigned char *)token; *c; ++c)
+    if (*c <= 32 || *c >= 127 || *c == '#') return "invalid_token";
+
+  url[strcspn(url, "#")] = 0;
+  char *query = strchr(url, '?');
+  char *write = query ? query : url + strlen(url);
+  char separator = '?';
+  if (query) {
+    for (const char *param = query + 1; *param;) {
+      size_t len = strcspn(param, "&");
+      const char *next = param + len;
+      if (*next) ++next;
+      if (len && !manifest_token_has_key(token, param, len)) {
+        *write++ = separator;
+        memmove(write, param, len);
+        write += len;
+        separator = '&';
+      }
+      param = next;
+    }
+  }
+  if ((size_t)(write - url) + 1 + strlen(token) >= capacity) return "url_too_long";
+  *write++ = separator;
+  strcpy(write, token);
+  return NULL;
+}
+
+static int fetch(const struct steam_cdn_server hosts[8], size_t count, const char *resource,
                  struct transfer *t) {
   size_t i, host;
   unsigned int attempt;
-  char url[2048] = {0}, token[1024] = {0};
+  char url[8192] = {0}, token[1024] = {0};
   if (!count || count > 8 || !t->cdn) {
     t->view->error = INSTALL_CDN;
     return 0;
@@ -241,10 +330,22 @@ static int fetch(const char hosts[8][128], size_t count, const char *resource,
       long status = 0, connections = 0;
       double first_byte = 0, total_time = 0;
       int n;
-      int authorized = 0;
+      int auth_retry = 0;
+      char current_host[CDN_NAME_SIZE];
+      unsigned hop = 0;
       host = (t->cdn->preferred + i) % count;
-      memcpy(token, t->cdn->tokens[host], sizeof(token));
-    retry_host:
+      strcpy(current_host, hosts[host].vhost);
+      n = snprintf(url, sizeof(url), "https://%s/%s", current_host, resource);
+      if (n < 0 || (size_t)n >= sizeof(url)) {
+        t->view->error = INSTALL_PATH;
+        RETURN(0);
+      }
+      if (t->cdn->tokens[host][0] &&
+          manifest_add_auth(url, sizeof(url), t->cdn->tokens[host])) {
+        steam_secret_clear(t->cdn->tokens[host], sizeof(token));
+        url[n] = 0;
+      }
+    request_url:
       if (!tick(t->cb)) {
         t->view->error = INSTALL_CANCELLED;
         RETURN(0);
@@ -254,13 +355,6 @@ static int fetch(const char hosts[8][128], size_t count, const char *resource,
       if (t->file && (fflush(t->file) || ftruncate(fileno(t->file), 0) ||
                       fseek(t->file, 0, SEEK_SET))) {
         t->view->error = INSTALL_IO;
-        RETURN(0);
-      }
-      n = snprintf(url, sizeof(url), "https://%s/%s%s%s", hosts[host], resource,
-                   token[0] ? "?" : "", token[0] == '?' ? token + 1 : token);
-      steam_secret_clear(token, sizeof(token));
-      if (n < 0 || (size_t)n >= sizeof(url)) {
-        t->view->error = INSTALL_PATH;
         RETURN(0);
       }
       curl_easy_reset(curl);
@@ -292,10 +386,18 @@ static int fetch(const char hosts[8][128], size_t count, const char *resource,
       OPT(CURLOPT_XFERINFOFUNCTION, transfer_tick);
       OPT(CURLOPT_XFERINFODATA, t);
       started = millis();
+      char error[CURL_ERROR_SIZE] = {0};
+      OPT(CURLOPT_ERRORBUFFER, error);
+#ifdef __SWITCH__
+      manifest_tls_host = current_host;
+#endif
       rc = curl_easy_perform(curl);
+#ifdef __SWITCH__
+      manifest_tls_host = NULL;
+#endif
       t->view->network_ms += millis() - started;
       ++t->view->requests;
-      /* Numeric timings only; never collect effective URL or signed tokens. */
+      /* Timings are collected for each individual HTTPS hop. */
       if (curl_easy_getinfo(curl, CURLINFO_STARTTRANSFER_TIME, &first_byte) == CURLE_OK &&
           curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &total_time) == CURLE_OK &&
           first_byte >= 0 && total_time >= first_byte) {
@@ -305,9 +407,21 @@ static int fetch(const char hosts[8][128], size_t count, const char *resource,
       curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
       if(curl_easy_getinfo(curl,CURLINFO_NUM_CONNECTS,&connections)==CURLE_OK&&connections>0)
         t->view->connections+=(unsigned int)connections;
-      /* Clear copied signed URL and pointers to stack transfer before leaving. */
+      /* Log hostnames only. The path and query may both contain credentials. */
+      long verify = -1;
+      curl_easy_getinfo(curl, CURLINFO_SSL_VERIFYRESULT, &verify);
+      network_diag("stage=steam.manifest.cdn appid=%u depot=%u host=%s round=%u request=%u hop=%u "
+                   "curl=%d http=%ld verify=%ld bytes=%zu elapsed_ms=%.0f auth_retry=%d",
+                   t->app, t->depot, current_host, attempt + 1, t->view->requests, hop,
+                   (int)rc, status, verify, t->used, total_time * 1000, auth_retry);
+      if (rc == CURLE_PEER_FAILED_VERIFICATION || rc == CURLE_SSL_CERTPROBLEM)
+        network_diag("stage=steam.manifest.tls appid=%u depot=%u host=%s curl=%d verify=%ld detail=%s",
+                     t->app, t->depot, current_host, (int)rc, verify, manifest_tls_detail(error));
+      int redirect = status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+      int follow = !rc && redirect &&
+        manifest_redirect(curl, t, status, hop, current_host, url, sizeof(url));
+      /* The next URL, if any, is now independent of libcurl. */
       curl_easy_reset(curl);
-      steam_secret_clear(url, sizeof(url));
 #undef OPT
       t->view->http_status = (unsigned int)status;
       t->view->transport = (unsigned int)rc;
@@ -319,29 +433,36 @@ static int fetch(const char hosts[8][128], size_t count, const char *resource,
         t->view->error = INSTALL_CANCELLED;
         RETURN(0);
       }
+      if (follow) {
+        ++hop;
+        auth_retry = 0;
+        goto request_url;
+      }
       if (!rc && status == 200) {
         t->cdn->preferred = host;
         RETURN(1);
       }
-      if (status == 401 || status == 403) {
-        size_t j;
-        if (authorized || !steam_backend_cdn_auth(t->backend, t->app, t->depot,
-                                                  hosts[host], token)) {
+      if (!rc && (status == 401 || status == 403)) {
+        /* Only the directory host's grant can be reused by the chunk pool.
+         * A redirect host's grant lives only in this hop's request URL. */
+        if (!hop) {
           steam_secret_clear(t->cdn->tokens[host], sizeof(token));
-          steam_secret_clear(token, sizeof(token));
-          continue;
+          url[n] = 0;
         }
-        for (j = 0; token[j]; ++j)
-          if ((unsigned char)token[j] <= 32 || (unsigned char)token[j] >= 127 ||
-              token[j] == '#')
-            break;
-        if (token[j]) {
-          steam_secret_clear(token, sizeof(token));
-          continue;
+        if (auth_retry) continue;
+        const char *auth_host = hop ? current_host : hosts[host].host;
+        int granted = steam_backend_cdn_auth(t->backend, t->app, t->depot, auth_host, token);
+        const char *reason = granted ? manifest_add_auth(url, sizeof(url), token) : "request_failed";
+        network_diag("stage=steam.manifest.auth appid=%u depot=%u host=%s round=%u request=%u hop=%u "
+                     "http=%ld result=%s error=%u", t->app, t->depot, auth_host, attempt + 1,
+                     t->view->requests, hop, status, reason ? reason : "granted",
+                     granted ? 0u : t->backend->error);
+        if (!reason && !hop) memcpy(t->cdn->tokens[host], token, sizeof(token));
+        steam_secret_clear(token, sizeof(token));
+        if (!reason) {
+          auth_retry = 1;
+          goto request_url;
         }
-        authorized = 1;
-        memcpy(t->cdn->tokens[host], token, sizeof(token));
-        goto retry_host;
       }
     }
   t->view->error = t->view->http_status == 401 || t->view->http_status == 403
@@ -349,6 +470,58 @@ static int fetch(const char hosts[8][128], size_t count, const char *resource,
                        : INSTALL_CDN;
   RETURN(0);
 #undef RETURN
+}
+
+static int fetch_manifest(struct steam_cdn_server hosts[8], size_t *count,
+                          const char *resource, struct transfer *t) {
+  if (fetch(hosts, *count, resource, t)) return 1;
+  if ((t->view->error != INSTALL_CDN && t->view->error != 1009) ||
+      t->cdn->alternate_directory_tried) return 0;
+  if (!tick(t->cb)) {
+    t->view->error = INSTALL_CANCELLED;
+    return 0;
+  }
+
+  /* The local directory can contain only regional mirrors. Ask the same
+   * authenticated Steam service for another cell after exhausting them.
+   * Cell 1 is a Valve cache region; 0 requests automatic selection. */
+  struct steam_backend *b = t->backend;
+  uint32_t cell = b->cell_id == 1 ? 0 : 1;
+  struct steam_cdn_server alternate[8];
+  size_t returned = 0, kept = 0;
+  unsigned int old_tls = b->tls_hosts, old_plain = b->plain_hosts;
+  t->cdn->alternate_directory_tried = 1;
+  if (!steam_backend_servers(b, cell, alternate, &returned)) {
+    network_diag("stage=steam.manifest.fallback appid=%u depot=%u cell=%u result=directory_failed error=%u",
+                 t->app, t->depot, cell, b->error);
+    return 0;
+  }
+  for (size_t i = 0; i < returned; ++i) {
+    if (!(b->tls_hosts & (1u << i))) continue;
+    size_t j;
+    for (j = 0; j < *count; ++j)
+      if (!strcmp(alternate[i].vhost, hosts[j].vhost)) break;
+    if (j < *count) continue;
+    for (j = 0; j < kept; ++j)
+      if (!strcmp(alternate[i].vhost, alternate[j].vhost)) break;
+    if (j == kept) alternate[kept++] = alternate[i];
+  }
+  network_diag("stage=steam.manifest.fallback appid=%u depot=%u from_cell=%u cell=%u result=%s hosts=%zu",
+               t->app, t->depot, b->cell_id, cell, kept ? "retry" : "no_new_https_hosts", kept);
+  if (!kept) {
+    b->tls_hosts = old_tls;
+    b->plain_hosts = old_plain;
+    return 0;
+  }
+  memcpy(hosts, alternate, kept * sizeof(*hosts));
+  *count = kept;
+  b->tls_hosts = (1u << kept) - 1;
+  b->plain_hosts = 0;
+  steam_secret_clear(t->cdn->tokens, sizeof(t->cdn->tokens));
+  memset(t->cdn->token_generation, 0, sizeof(t->cdn->token_generation));
+  t->cdn->preferred = 0;
+  t->view->error = 0;
+  return fetch(hosts, kept, resource, t);
 }
 static int unzip(const char *archive, const char *output,
                  const struct steam_install_callbacks *cb) {
@@ -592,7 +765,7 @@ struct request {
 struct depot_run {
   struct transfer *t;
   struct steam_engine *engine;
-  char (*hosts)[128];
+  const struct steam_cdn_server *hosts;
   size_t host_count;
   const char *stage;
   const unsigned char *key;
@@ -893,13 +1066,15 @@ static int run_start(struct depot_run *r, unsigned int slot) {
   struct transfer *t = r->t;
   char url[2048] = {0}, hash[41];
   const char *token = t->cdn->tokens[q->host];
+  unsigned int bit = 1u << q->host;
+  int plain_only = (t->backend->plain_hosts & bit) && !(t->backend->tls_hosts & bit);
   unsigned int i;
   int n, ok = 0;
   for (i = 0; i < 20; ++i)
     snprintf(hash + i * 2, 3, "%02x", q->work.chunk.sha[i]);
   n = snprintf(url, sizeof(url), "%s://%s/depot/%u/chunk/%s%s%s",
-               t->backend->plain_hosts >> q->host & 1 ? "http" : "https",
-               r->hosts[q->host], t->depot, hash, token[0] ? "?" : "",
+               plain_only && !token[0] ? "http" : "https",
+               r->hosts[q->host].vhost, t->depot, hash, token[0] ? "?" : "",
                token[0] == '?' ? token + 1 : token);
   if (n > 0 && (size_t)n < sizeof(url))
     ok = steam_cdn_start(t->cdn->pool, slot, url, q->buffer,
@@ -957,7 +1132,7 @@ static int run_result(struct depot_run *r,
     q->authorized = 1;
     /* Whoever sees the refusal first asks Steam; the others reuse its answer. */
     if (q->token_generation == t->cdn->token_generation[q->host] &&
-        steam_backend_cdn_auth(t->backend, t->app, t->depot, r->hosts[q->host],
+        steam_backend_cdn_auth(t->backend, t->app, t->depot, r->hosts[q->host].host,
                                token)) {
       for (n = 0; token[n]; ++n)
         if ((unsigned char)token[n] <= 32 || (unsigned char)token[n] >= 127 ||
@@ -1193,7 +1368,8 @@ int steam_install_run(struct steam_backend *backend, const char *root,
   struct steam_download_view v = {.state = STEAM_DOWNLOAD_PLANNING,
                                   .app_id = appid,
                                   .parallelism=backend->concurrency?backend->concurrency:1};
-  char hosts[8][128], stage[1024], final[1024], cache[1024], suffix[128],
+  struct steam_cdn_server hosts[8];
+  char stage[1024], final[1024], cache[1024], suffix[128],
       zip[1024];
   char(*manifest_paths)[1024] = calloc(STEAM_DEPOT_LIMIT, 1024);
   unsigned char keys[STEAM_DEPOT_LIMIT][32], *plain = NULL;
@@ -1302,7 +1478,7 @@ int steam_install_run(struct steam_backend *backend, const char *root,
       goto done;
     }
   }
-  if (!steam_backend_servers(backend, hosts, &hosts_count)) {
+  if (!steam_backend_servers(backend, backend->cell_id, hosts, &hosts_count)) {
     v.error = backend->error;
     goto done;
   }
@@ -1349,20 +1525,32 @@ int steam_install_run(struct steam_backend *backend, const char *root,
       snprintf(resource, sizeof(resource), "depot/%u/manifest/%llu/5/%llu",
                app.depots[i].id, (unsigned long long)app.depots[i].manifest,
                (unsigned long long)code);
-      ok = fetch(hosts, hosts_count, resource, &t);
-      if (fclose(t.file))
+      ok = fetch_manifest(hosts, &hosts_count, resource, &t);
+      if (fclose(t.file) && ok) {
+        v.error = errno == ENOSPC ? INSTALL_DISK : INSTALL_IO;
         ok = 0;
-      if (!ok)
+      }
+      if (!ok) {
+        network_diag("stage=steam.manifest.result appid=%u depot=%u result=failed error=%u",
+                     appid, t.depot, v.error);
         goto done;
+      }
       if (!unzip(zip, manifest_paths[i], cb)) {
         v.error = errno == ENOSPC ? INSTALL_DISK : INSTALL_CORRUPT;
+        network_diag("stage=steam.manifest.result appid=%u depot=%u result=unzip_failed error=%u",
+                     appid, t.depot, v.error);
         goto done;
       }
       if (!steam_manifest_open(&m, manifest_paths[i], app.depots[i].id,
                                app.depots[i].manifest, keys[i])) {
         v.error = INSTALL_CORRUPT;
+        network_diag("stage=steam.manifest.result appid=%u depot=%u result=invalid_manifest",
+                     appid, t.depot);
         goto done;
       }
+      network_diag("stage=steam.manifest.result appid=%u depot=%u source=network result=opened", appid, t.depot);
+    } else {
+      network_diag("stage=steam.manifest.result appid=%u depot=%u source=cache result=opened", appid, t.depot);
     }
     if (v.total > UINT64_MAX - m.total_size) {
       v.error = INSTALL_PROTOCOL;

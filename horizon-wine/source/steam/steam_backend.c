@@ -1,4 +1,5 @@
 #include "steam_backend.h"
+#include "../network_diag.h"
 #include <string.h>
 int steam_backend_cdn_auth(struct steam_backend *b, uint32_t app,
                            uint32_t depot, const char *host, char token[1024]);
@@ -215,7 +216,7 @@ static int hostname(const char *s) {
   }
   return dots > 0;
 }
-int steam_backend_servers(struct steam_backend *b, char hosts[8][128],
+int steam_backend_servers(struct steam_backend *b, uint32_t cell, struct steam_cdn_server servers[8],
                           size_t *count) {
   unsigned char body[16];
   struct steam_wire_writer w = {body, sizeof(body), 0, 0};
@@ -226,8 +227,8 @@ int steam_backend_servers(struct steam_backend *b, char hosts[8][128],
   unsigned int plain = 0, tls = 0;
   *count = 0;
   b->error = 3004;
-  /* Routing hint issued by authenticated CM logon, never a license. */
-  steam_wire_uint(&w, 1, b->cell_id);
+  /* Directory routing is independent of the account's depot licence. */
+  steam_wire_uint(&w, 1, cell);
   steam_wire_uint(&w, 2, 20);
   if (!service(b, STEAM_SERVICE_SERVERS, &w, &m))
     return 0;
@@ -243,8 +244,7 @@ int steam_backend_servers(struct steam_backend *b, char hosts[8][128],
       s = (struct steam_wire_reader){f.data, f.size, 0, 0};
       /* An entry this cannot use is passed over; it does not spoil the list.
        * Passed over: a server for Steam China only, a proxy, one kept for a
-       * list of applications, and one reached under another name than its
-       * address (the request here carries one name). */
+       * list of applications. */
       while (steam_wire_next(&s, &v) == 1) {
         unsigned int bit = v.number == 1    ? 1
                            : v.number == 8  ? 2
@@ -280,20 +280,22 @@ int steam_backend_servers(struct steam_backend *b, char hosts[8][128],
       for (i = 0; virtual[i]; ++i)
         if (virtual[i] >= 'A' && virtual[i] <= 'Z')
           virtual[i] += 'a' - 'A';
-      if (virtual[0] && strcmp(virtual, host))
+      if (virtual[0] && !hostname(virtual))
         unusable = 1;
-      /* Valve's own servers are "SteamCache", a contracted network's "CDN";
-       * the Steam client downloads from both.
-       * Depot content is encrypted with the depot key and every chunk is
-       * checked against the manifest, so the Steam client fetches it over
-       * plain HTTP wherever the server allows; so does this installer. */
+      /* SteamCache and CDN entries both serve depot manifests and chunks. */
       if (!unusable && (!strcmp(type, "CDN") || !strcmp(type, "SteamCache")) &&
           hostname(host) && *count < 8) {
         if (strcmp(https, "mandatory"))
           plain |= 1u << *count;
         if (!strcmp(https, "mandatory") || !strcmp(https, "optional"))
           tls |= 1u << *count;
-        strcpy(hosts[(*count)++], host);
+        struct steam_cdn_server *server = &servers[(*count)++];
+        strcpy(server->host, host);
+        strcpy(server->vhost, virtual[0] ? virtual : host);
+        network_diag("stage=steam.cdn.directory host=%s vhost=%s vhost_source=%s tls=%s",
+                     server->host, server->vhost, virtual[0] ? "directory" : "host_fallback",
+                     !strcmp(https, "mandatory") ? "mandatory" :
+                     !strcmp(https, "optional") ? "optional" : "not_advertised");
       }
     }
   if (n < 0 || !*count)

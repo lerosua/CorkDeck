@@ -39,9 +39,9 @@ void steam_provider_library_status(struct steam_provider *,struct steam_library_
 size_t steam_provider_library_page(struct steam_provider *,const char *,size_t,struct steam_game *,size_t,size_t *);
 size_t steam_provider_installed_page(struct steam_provider *,const char *,size_t,struct steam_game *,size_t,size_t *);
 enum steam_status { STEAM_OFFLINE,STEAM_CONNECTING,STEAM_AUTHENTICATING,STEAM_NEED_GUARD,
-    STEAM_CONFIRM_DEVICE,STEAM_LOGGING_ON,STEAM_ONLINE,STEAM_ERROR };
+    STEAM_CONFIRM_DEVICE,STEAM_LOGGING_ON,STEAM_ONLINE,STEAM_ERROR,STEAM_WAIT_NETWORK };
 struct steam_status_view { enum steam_status state; unsigned int error,guard_type; uint64_t steam_id;
-    unsigned int failed_stage,cm_type,transport_error; };
+    unsigned int failed_stage,cm_type,transport_error; int restoring; };
 struct steam_provider *steam_provider_create(void);
 void steam_provider_destroy(struct steam_provider *);
 int steam_provider_login(struct steam_provider *,const char *,const char *);

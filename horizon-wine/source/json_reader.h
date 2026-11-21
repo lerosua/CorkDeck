@@ -220,4 +220,23 @@ static inline int json_uint( struct parser *p, unsigned long long *value )
     return 1;
 }
 
+/* Return just the value at a given level; the store also sends recommended
+ * requirements and separate SteamOS/Machine ratings with similar names. */
+static inline int json_member(struct parser object, const char *name, struct parser *value)
+{
+    if (!consume(&object, '{')) return 0;
+    do {
+        char key[128];
+        if (!json_string(&object, key, sizeof(key)) || !consume(&object, ':')) return 0;
+        struct parser start = object;
+        if (!skip_value(&object)) return 0;
+        if (!strcmp(name, key)) {
+            start.end = object.p;
+            *value = start;
+            return 1;
+        }
+    } while (consume(&object, ','));
+    return 0;
+}
+
 #endif

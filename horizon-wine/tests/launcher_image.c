@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <png.h>
+#include <turbojpeg.h>
 #include "../source/launcher_image.h"
 
 int main( int argc, char **argv )
@@ -39,6 +40,21 @@ int main( int argc, char **argv )
         assert( data && png_image_write_to_memory( &png, data, &bytes, 0, pixels, 0, NULL ) );
         assert( !launcher_image_decode( data, bytes, &image ) );
         free( data );
+    }
+    /* Adobe YCCK stores inverted samples. Check the colour as well as decode success. */
+    {
+        unsigned char inverted[] = {255, 32, 0, 192};
+        unsigned char *encoded = NULL;
+        unsigned long length = 0;
+        tjhandle encoder = tjInitCompress();
+        assert( encoder && !tjCompress2( encoder, inverted, 1, 0, 1, TJPF_CMYK, &encoded, &length,
+                                         TJSAMP_444, 100, 0 ) );
+        assert( launcher_image_decode( encoded, length, &decoded ) );
+        assert( decoded.width == 1 && decoded.height == 1 && abs(decoded.data[0] - 192) <= 2 &&
+                abs(decoded.data[1] - 24) <= 2 && decoded.data[2] <= 2 && decoded.data[3] == 255 );
+        launcher_icon_free( &decoded );
+        tjFree( encoded );
+        tjDestroy( encoder );
     }
     puts( "Forwarder icons: PNG/JPEG, bounded decode, alpha, aspect ratio and 256px JPEG passed" );
     return 0;

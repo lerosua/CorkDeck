@@ -16,6 +16,7 @@
 #include <string.h>
 void wine_nx_runtime_trace(const char *s){puts(s);}
 static int mode,install_calls,resume_calls;
+static enum steam_library_state library_state = STEAM_LIBRARY_READY;
 static char installed_language[32];
 int steam_provider_inspect(struct steam_provider *p,uint32_t app){(void)p;(void)app;return 1;}
 void steam_provider_app_status(struct steam_provider *p,struct steam_app_view *v){(void)p;*v=(struct steam_app_view){.app_id=123,.state=2,.windows=1,.size=250u*1048576,.language_missing=mode==18,.available_languages=steam_language_mask("russian")|STEAM_LANGUAGE_BASE};}
@@ -51,7 +52,7 @@ void steam_provider_download_status(struct steam_provider *p,struct steam_downlo
  if(mode==20){v->error=3103;v->integrity_detail=STEAM_INTEGRITY_FILE_SHA;v->chunk_format=2;v->integrity_retries=2;}
  if(mode==19){v->error=3111;v->available_languages=steam_language_mask("russian")|STEAM_LANGUAGE_BASE;}
  strcpy(v->file,"data/example.dat");}
-void steam_provider_library_status(struct steam_provider *p,struct steam_library_view *v){(void)p;*v=(struct steam_library_view){.state=STEAM_LIBRARY_READY,.count=2};}
+void steam_provider_library_status(struct steam_provider *p,struct steam_library_view *v){(void)p;*v=(struct steam_library_view){.state=library_state,.count=2};}
 size_t steam_provider_library_page(struct steam_provider *p,const char *s,size_t offset,struct steam_game *g,size_t capacity,size_t *total){(void)p;(void)s;*total=2;if(offset||capacity<2)return 0;g[0]=(struct steam_game){.app_id=123,.shared=1,.lender=42};strcpy(g[0].name,"Synthetic Windows game");g[1]=(struct steam_game){.app_id=456,.installed=1};strcpy(g[1].name,"Synthetic installed game");return 2;}
 size_t steam_provider_installed_page(struct steam_provider *p,const char *s,size_t offset,struct steam_game *g,size_t capacity,size_t *total){struct steam_game all[2];(void)capacity;steam_provider_library_page(p,s,0,all,2,total);*total=1;if(offset)return 0;*g=all[1];return 1;}
 int steam_install_executable(const char *r,uint32_t a,char out[512]){(void)r;(void)a;out[0]=0;return 0;}
@@ -113,6 +114,14 @@ int main(int argc,char **argv)
 {
     struct ui ui;FILE *font;long length;unsigned char *data;
     assert(argc==4||argc==5);output=argv[2];mode=atoi(argv[3]);
+    if (mode == 1 && argc == 5) {
+        struct steam_game games[2];
+        library_state = STEAM_LIBRARY_LOADING;
+        assert(steam_ui_owned(argv[4], games, 2) == 2 && games[0].app_id == 123);
+        library_state = STEAM_LIBRARY_FAILED;
+        assert(steam_ui_owned(argv[4], games, 2) == 2 && games[1].app_id == 456);
+        library_state = STEAM_LIBRARY_READY;
+    }
     if (mode == 9) {
         char path[768], saved[2048], after[2048]; FILE *f; size_t n, m;
         struct steam_download_view download = {.state=STEAM_DOWNLOAD_COMPLETE,.app_id=123,

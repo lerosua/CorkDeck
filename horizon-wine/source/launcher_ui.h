@@ -133,7 +133,7 @@ struct ui
     int footer_buttons[UI_FOOTER_HINTS];
     int footer_count;
 
-    int status_visible; /* This frame drew the system indicators. */
+    Uint32 status_refresh_ms; /* Idle redraw interval for visible status indicators. */
     Uint32 fx_start, busy_until, deadline;
     float highlight, last_highlight;
     int scrolling_text;

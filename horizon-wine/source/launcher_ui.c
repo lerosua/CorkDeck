@@ -1122,7 +1122,7 @@ int ui_begin_frame( struct ui *ui )
         ui->trigger_left = ui->trigger_right = 0;
     }
     ui->scrolling_text = 0;
-    ui->status_visible = 0;
+    ui->status_refresh_ms = 0;
     repeat_held( ui );
     if (ui->screen) SDL_SetRenderTarget( ui->renderer, ui->screen );
     return 1;
@@ -1334,7 +1334,7 @@ static int needs_animation( struct ui *ui )
 }
 
 /* Wait for the next frame: about 60 per second while something moves, else
- * until input or the next one-second system status refresh. */
+ * until input or the next status refresh. */
 void ui_wait( struct ui *ui )
 {
     SDL_Event event;
@@ -1346,7 +1346,8 @@ void ui_wait( struct ui *ui )
         ui->deadline = 0;
         for (;;)
         {
-            if (SDL_WaitEventTimeout( &event, 250 ))
+            int timeout = ui->status_refresh_ms && ui->status_refresh_ms < 250 ? (int)ui->status_refresh_ms : 250;
+            if (SDL_WaitEventTimeout( &event, timeout ))
             {
                 queue_event( ui, &event );
                 return;
@@ -1356,7 +1357,7 @@ void ui_wait( struct ui *ui )
                 ui->running = 0;
                 return;
             }
-            if (ui->status_visible && SDL_GetTicks() - now >= 1000) return;
+            if (ui->status_refresh_ms && SDL_GetTicks() - now >= ui->status_refresh_ms) return;
         }
     }
     if (!ui->deadline || SDL_TICKS_PASSED( now, ui->deadline + 16 )) ui->deadline = now;

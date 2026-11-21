@@ -22,6 +22,7 @@
 #include "../config_json.h"
 #include "../system_language.h"
 #include "../steam/steam_provider.h"
+#include "../network_diag.h"
 #include "../steam/steam_artwork.h"
 #include "shell_strings.inc"
 
@@ -60,7 +61,9 @@ static struct shell
     int owned_count;
     int steam_asked;      /* the saved session was tried once this run */
     int developer;        /* developer mode: the Diagnostics page, the card's probe, the logs */
-    Uint32 owned_read;
+    unsigned int owned_generation;
+    int owned_read;
+    const char *last_steam_label;
     struct wine_nx_config global;
     char global_path[512];
     struct { SDL_Rect rect; int code; } hits[128];
@@ -526,6 +529,69 @@ static void sh_art_stop( void )
  * Top bar, buttons, cards
  */
 
+static const char *sh_steam_status( const struct steam_status_view *steam )
+{
+    switch (steam->state)
+    {
+    case STEAM_ONLINE: return "Steam signed in";
+    case STEAM_WAIT_NETWORK: return "Steam offline - waiting to reconnect";
+    case STEAM_NEED_GUARD:
+    case STEAM_CONFIRM_DEVICE: return "Steam awaiting confirmation";
+    case STEAM_CONNECTING:
+    case STEAM_AUTHENTICATING:
+    case STEAM_LOGGING_ON: return steam->restoring ? "Restoring Steam session" : "Steam signing in";
+    case STEAM_ERROR:
+        if (steam->failed_stage == STEAM_LOGGING_ON && steam->error >= 1000 && steam->error < 2000)
+            return "Steam sign-in failed";
+        return "Steam offline";
+    default: return "Steam signed out";
+    }
+}
+
+static int sh_draw_steam_status( struct launcher *l, const struct steam_status_view *steam, int right, int cy )
+{
+    struct ui *ui = &l->ui;
+    const char *label = sh_tr( sh_steam_status( steam ) );
+    SDL_Texture *mark = l->symbols[SYMBOL_STEAM_STATUS];
+    SDL_Color color = steam->state == STEAM_ONLINE ? SH_GREEN : (SDL_Color){ 153, 159, 166, 255 };
+    const int indicator_width = 18;
+    int left = right - 26;
+    if (mark)
+    {
+        SDL_SetTextureColorMod( mark, color.r, color.g, color.b );
+        draw_symbol( l, SYMBOL_STEAM_STATUS, left, cy, 255 );
+    }
+    else
+    {
+        left = right - ui_text_width( ui, ui->small, "Steam" );
+        ui_text_right( ui, ui->small, right, cy - TTF_FontHeight( ui->small ) / 2, "Steam", color );
+    }
+
+    /* Reserve the same space in every state so the title and download progress stay put. */
+    if (steam->state == STEAM_CONNECTING || steam->state == STEAM_AUTHENTICATING ||
+        steam->state == STEAM_LOGGING_ON)
+    {
+        static const SDL_Point ring[] = {{0,-5},{4,-4},{5,0},{4,4},{0,5},{-4,4},{-5,0},{-4,-4}};
+        const unsigned phase = SDL_GetTicks() / 100 % SDL_arraysize(ring);
+        ui->status_refresh_ms = 100;
+        for (unsigned i = 0; i < SDL_arraysize(ring); i++)
+        {
+            const SDL_Point p = ring[(phase + i) % SDL_arraysize(ring)];
+            Uint8 shade = 65 + 24 * i;
+            ui_fill_circle( ui, left - 11 + p.x, cy + p.y, 1.6f, (SDL_Color){shade, shade, shade, 255} );
+        }
+    }
+    else if (steam->state == STEAM_NEED_GUARD || steam->state == STEAM_CONFIRM_DEVICE)
+        ui_fill_circle( ui, left - 11, cy, 3, SH_AMBER );
+    if (!sh.last_steam_label || strcmp( sh.last_steam_label, label ))
+    {
+        network_diag( "stage=steam.topbar previous=\"%s\" label=\"%s\" state=%u",
+                      sh.last_steam_label ? sh.last_steam_label : "", label, (unsigned)steam->state );
+        sh.last_steam_label = label;
+    }
+    return left - indicator_width - 18;
+}
+
 static void sh_top( struct launcher *l, const char *crumb, const char *detail )
 {
     struct ui *ui = &l->ui;
@@ -543,7 +609,6 @@ static void sh_top( struct launcher *l, const char *crumb, const char *detail )
         ui_text( ui, ui->small, x, cy - TTF_FontHeight( ui->small ) / 2, crumb, ui->dim );
         x += ui_text_width( ui, ui->small, crumb ) + 10;
     }
-    if (detail) sh_fit( ui, ui->small, x, cy - TTF_FontHeight( ui->small ) / 2, 420, detail, ui->dim, 0 );
 
     read_system_status( l );
     if (l->status & LAUNCHER_STATUS_CLOCK)
@@ -561,7 +626,12 @@ static void sh_top( struct launcher *l, const char *crumb, const char *detail )
         right -= 48;
     }
     right = draw_network_status( ui, l->network, right, cy ) - 18;
-    if (sh_download( &d ) && d.total)
+    struct steam_status_view steam;
+    steam_ui_status( &steam );
+    int y = cy - TTF_FontHeight( ui->small ) / 2;
+    right = sh_draw_steam_status( l, &steam, right, cy );
+
+    if (sh_download( &d ) && d.total && right - x > 180)
     {
         int percent = (int)(d.downloaded * 100 / d.total), w = 90;
 
@@ -569,8 +639,14 @@ static void sh_top( struct launcher *l, const char *crumb, const char *detail )
         ui_rounded( ui, right - w, cy - 3, w * percent / 100 > 6 ? w * percent / 100 : 6, 6, 3, SH_BLUE );
         right -= w + 10;
         snprintf( text, sizeof(text), "%s · %d%%", sh_owned_name( d.app_id ), percent );
-        ui_text_right( ui, ui->small, right, cy - TTF_FontHeight( ui->small ) / 2, text, SH_BLUE );
+        int width = ui_text_width( ui, ui->small, text );
+        if (width > 220) width = 220;
+        if (width > right - x) width = right - x;
+        right -= width;
+        sh_fit( ui, ui->small, right, y, width, text, SH_BLUE, 0 );
+        right -= 16;
     }
+    if (detail) sh_fit( ui, ui->small, x, y, right - x, detail, ui->dim, 0 );
 }
 
 static void sh_frame_begin( struct launcher *l )
@@ -735,11 +811,13 @@ static void sh_read_owned( struct launcher *l, int force )
     struct steam_game *page;
     size_t count, i;
 
-    if (!force && sh.owned_read && SDL_GetTicks() - sh.owned_read < 15000) return;
-    sh.owned_read = SDL_GetTicks() | 1;
-    sh.owned_count = 0;
+    unsigned int generation = steam_ui_library_generation();
+    if (!force && sh.owned_read && sh.owned_generation == generation) return;
     if (!(page = malloc( sizeof(*page) * SH_OWNED ))) return;
     count = steam_ui_owned( l->options->runtime_dir, page, SH_OWNED );
+    sh.owned_read = 1;
+    sh.owned_generation = generation;
+    sh.owned_count = 0;
     for (i = 0; i < count && sh.owned_count < SH_OWNED; i++)
         if (!page[i].installed) sh.owned[sh.owned_count++] = page[i];
     free( page );
@@ -3274,8 +3352,12 @@ static void sh_draw_library( struct launcher *l )
     {
         const char *title = "Nothing here yet", *detail = "X adds a program from the card. Steam games appear once the account is signed in (Maintenance > Steam account).";
 
+        struct steam_status_view steam;
+        steam_ui_status( &steam );
         if (l->search[0]) { title = "Nothing matches the search"; detail = "Y changes the search; an empty search shows everything."; }
-        else if (sh.tab == TAB_AVAILABLE && !steam_ui_online()) { title = "Steam is not signed in"; detail = "Press A to sign in: scan the code with the Steam app on a phone, or enter the account's name and password."; }
+        else if (sh.tab == TAB_AVAILABLE && steam.state != STEAM_ONLINE && steam.state != STEAM_OFFLINE && steam.state != STEAM_ERROR)
+        { title = sh_steam_status( &steam ); detail = "The library will appear when it is ready."; }
+        else if (sh.tab == TAB_AVAILABLE && steam.state != STEAM_ONLINE) { title = steam.state == STEAM_ERROR ? sh_steam_status( &steam ) : "Steam is not signed in"; detail = "Press A to sign in: scan the code with the Steam app on a phone, or enter the account's name and password."; }
         else if (sh.tab == TAB_AVAILABLE) { title = "No Steam games to install"; detail = "The account's library is loading, or everything in it is installed already."; }
         else if (sh.tab == TAB_CATEGORY && !sh.category[0]) { title = "No categories yet"; detail = "A category is a list of your own. Press A to make the first one, then add applications to it from a list."; }
         else if (sh.tab == TAB_CATEGORY) { title = "This category is empty"; detail = "Press A to add applications to it from a list."; }
@@ -3739,7 +3821,7 @@ static int shell_run( struct launcher *l, char *target, size_t size )
             ui_toast( ui, "USB programs refreshed", 1800 );
         }
         if (sh.page == PAGE_LIBRARY && (sh.tab == TAB_ALL || sh.tab == TAB_AVAILABLE) &&
-            SDL_GetTicks() - sh.owned_read > 15000)
+            (!sh.owned_read || sh.owned_generation != steam_ui_library_generation()))
             sh_rebuild( l, sh.zone && sh.selection < sh.count ? sh.items[sh.selection] : -1 );
         l->icon_frame = l->icon_use;
         sh_draw_root( l );

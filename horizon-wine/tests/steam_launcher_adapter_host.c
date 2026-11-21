@@ -43,6 +43,61 @@ static void network_indicator(struct ui *ui)
     puts("Wi-Fi strengths, offline, Ethernet and connecting render distinctly; idle status refresh wakes without input");
 }
 
+static void steam_indicator(struct launcher *l)
+{
+    struct ui *ui = &l->ui;
+    const SDL_Rect badge = {40, 16, 26, 26}, wheel = {20, 16, 18, 26};
+    Uint8 idle[26 * 26 * 4], busy[sizeof(idle)], online[sizeof(idle)];
+    Uint8 before[18 * 26 * 4], after[sizeof(before)], blank[sizeof(before)];
+    struct steam_status_view status = {.state = STEAM_WAIT_NETWORK, .restoring = 1};
+    l->symbols[SYMBOL_STEAM_STATUS] = ui_svg_texture(ui, icon_steam.d, 0, 0, 24, 24, 26);
+    assert(l->symbols[SYMBOL_STEAM_STATUS]);
+    shell_language = APP_LANG_ZH_CN;
+    int animations = ui->animations;
+    ui->animations = 0;
+    ui_fill(ui, 16, 12, 58, 36, (SDL_Color){0, 0, 0, 255});
+    assert(!SDL_RenderReadPixels(ui->renderer, &wheel, SDL_PIXELFORMAT_RGBA32, blank, wheel.w * 4));
+    int left = sh_draw_steam_status(l, &status, 66, 29);
+    assert(!strcmp(sh.last_steam_label, "Steam 离线，等待重连"));
+    assert(!SDL_RenderReadPixels(ui->renderer, &badge, SDL_PIXELFORMAT_RGBA32, idle, badge.w * 4));
+    assert(!SDL_RenderReadPixels(ui->renderer, &wheel, SDL_PIXELFORMAT_RGBA32, before, wheel.w * 4));
+    assert(!memcmp(blank, before, sizeof(before)));
+
+    status.state = STEAM_CONNECTING;
+    ui_fill(ui, 16, 12, 58, 36, (SDL_Color){0, 0, 0, 255});
+    assert(sh_draw_steam_status(l, &status, 66, 29) == left);
+    assert(!strcmp(sh.last_steam_label, "正在恢复 Steam 会话") && ui->status_refresh_ms == 100);
+    assert(!SDL_RenderReadPixels(ui->renderer, &badge, SDL_PIXELFORMAT_RGBA32, busy, badge.w * 4));
+    assert(!memcmp(idle, busy, sizeof(idle)));
+    assert(!SDL_RenderReadPixels(ui->renderer, &wheel, SDL_PIXELFORMAT_RGBA32, before, wheel.w * 4));
+    SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+    ui_wait(ui);
+    ui_fill(ui, 16, 12, 58, 36, (SDL_Color){0, 0, 0, 255});
+    sh_draw_steam_status(l, &status, 66, 29);
+    assert(!SDL_RenderReadPixels(ui->renderer, &wheel, SDL_PIXELFORMAT_RGBA32, after, wheel.w * 4));
+    assert(memcmp(before, after, sizeof(before)));
+
+    status.state = STEAM_ONLINE;
+    ui_fill(ui, 16, 12, 58, 36, (SDL_Color){0, 0, 0, 255});
+    assert(sh_draw_steam_status(l, &status, 66, 29) == left);
+    assert(!strcmp(sh.last_steam_label, "Steam 已登录"));
+    assert(!SDL_RenderReadPixels(ui->renderer, &badge, SDL_PIXELFORMAT_RGBA32, online, badge.w * 4));
+    assert(!SDL_RenderReadPixels(ui->renderer, &wheel, SDL_PIXELFORMAT_RGBA32, after, wheel.w * 4));
+    assert(!memcmp(blank, after, sizeof(blank)));
+    unsigned green = 0;
+    for (size_t i = 0; i < sizeof(online); i += 4)
+        if (online[i] == SH_GREEN.r && online[i+1] == SH_GREEN.g && online[i+2] == SH_GREEN.b) {
+            assert(idle[i] == 153 && idle[i+1] == 159 && idle[i+2] == 166);
+            ++green;
+        }
+    assert(green > 100);
+    SDL_DestroyTexture(l->symbols[SYMBOL_STEAM_STATUS]);
+    l->symbols[SYMBOL_STEAM_STATUS] = NULL;
+    ui->animations = animations;
+    shell_language = APP_LANG_EN;
+    puts("Steam mark stays gray during recovery, spinner advances without input, online mark turns green");
+}
+
 /* Exercise the same card branch used by the 7x2 Not installed grid. Keep the
  * network paused so that a successful render must have come from the card. */
 static void cached_library_grid(struct launcher *l)
@@ -56,6 +111,7 @@ static void cached_library_grid(struct launcher *l)
 
     assert(ui_init(&l->ui, corkdeck_font, corkdeck_font_size, 0));
     network_indicator(&l->ui);
+    steam_indicator(l);
     assert(sh_library_art(l));
     steam_artwork_pause(sh.library_art, 1);
     for (int i = 0; i < count; i++) {

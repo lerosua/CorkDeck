@@ -3,9 +3,11 @@
 #include "steam_probe.h"
 #include "steam_cm_message.h"
 struct steam_cm;
-struct steam_cm *steam_cm_connect(steam_cancel_fn, void *, unsigned int *error);
-/* The transfer library's code from the last server-directory request. */
+struct steam_cm *steam_cm_connect(const char *root, steam_cancel_fn, void *, unsigned int *error);
+/* The transfer library's code from the last directory request or CM connection attempt. */
 unsigned int steam_cm_connect_transport(void);
+const char *steam_cm_endpoint(const struct steam_cm *);
+void steam_cm_remember(const char *root, const char *endpoint);
 void steam_cm_close(struct steam_cm *);
 /* Single worker, one in-flight RPC. Raw response remains internal and is wiped on reuse. */
 int steam_cm_exchange(struct steam_cm *, const void *, size_t, uint64_t job, uint32_t type, struct steam_cm_message *);

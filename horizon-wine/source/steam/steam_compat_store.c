@@ -1,5 +1,5 @@
 #include "steam_compat.h"
-#include "../network_diag.h"
+#include "../network_diag_curl.h"
 #include <SDL.h>
 #include <curl/curl.h>
 #include <stdlib.h>
@@ -41,13 +41,17 @@ static int superseded(void *opaque, curl_off_t a, curl_off_t b, curl_off_t c, cu
     return r->generation != SDL_AtomicGet(&store.generation);
 }
 
-static int fetch(CURL *curl, const char *url, struct response *r, const char *stage)
+static int fetch(CURL *curl, const char *url, struct response *r, uint32_t app, const char *stage)
 {
     long http = 0;
     r->size = 0;
-    if (!curl || !r->bytes) return 0;
+    if (!curl || !r->bytes) {
+        network_diag("stage=steam.compat.%s appid=%u result=init_failed", stage, app);
+        return 0;
+    }
     curl_easy_reset(curl);
-#define OPTION(k,v) do { if (curl_easy_setopt(curl, k, v) != CURLE_OK) return 0; } while (0)
+#define OPTION(k,v) do { CURLcode opt = curl_easy_setopt(curl, k, v); if (opt != CURLE_OK) { \
+        network_diag("stage=steam.compat.%s appid=%u result=setup_failed curl=%d", stage, app, (int)opt); return 0; } } while (0)
     OPTION(CURLOPT_URL, url);
     OPTION(CURLOPT_PROXY, "");
     OPTION(CURLOPT_ACCEPT_ENCODING, "");
@@ -62,8 +66,32 @@ static int fetch(CURL *curl, const char *url, struct response *r, const char *st
 #undef OPTION
     CURLcode code = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http);
-    network_diag("stage=steam.compat.%s curl=%d http=%ld bytes=%zu", stage, (int)code, http, r->size);
+    char context[96];
+    snprintf(context, sizeof(context), "steam.compat.%s appid=%u bytes=%zu", stage, app, r->size);
+    network_diag_curl(context, curl, code);
     return code == CURLE_OK && http == 200;
+}
+
+/* Publisher-supplied specs are public. Keep each field on a single line
+ * and omit links instead of copying URLs into diagnostic exports. */
+static const char *log_field(char *field)
+{
+    if (!*field) return "-";
+    if (strstr(field, "://") || strchr(field, '?')) return "(link omitted)";
+    for (char *p = field; *p; ++p)
+        if ((unsigned char)*p < 32 || *p == 127 || *p == '"') *p = ' ';
+    return field;
+}
+
+static void log_minimum(uint32_t app, int fetched, int parsed, struct steam_minimum m)
+{
+    const char *result = !fetched ? "not_fetched" : !parsed ? "invalid" :
+        (m.memory[0] || m.directx[0] || m.processor[0] || m.graphics[0]) ? "ok" : "no_fields";
+    network_diag("stage=steam.compat.windows.parse appid=%u result=%s ram=\"%s\" directx=\"%s\"",
+                 app, result, log_field(m.memory), log_field(m.directx));
+    if (parsed)
+        network_diag("stage=steam.compat.windows.hardware appid=%u cpu=\"%s\" gpu=\"%s\"",
+                     app, log_field(m.processor), log_field(m.graphics));
 }
 
 /* ui_wait sleeps until an SDL event when the page is idle. */
@@ -91,7 +119,9 @@ static int run(void *unused)
         char url[160];
         SDL_UnlockMutex(store.mutex);
         snprintf(url, sizeof(url), "https://store.steampowered.com/api/appdetails?appids=%u&l=english", app);
-        int ok = fetch(curl, url, &r, "windows") && steam_compat_parse_minimum(r.bytes, r.size, app, &minimum);
+        int fetched = fetch(curl, url, &r, app, "windows");
+        int ok = fetched && steam_compat_parse_minimum(r.bytes, r.size, app, &minimum);
+        log_minimum(app, fetched, ok, minimum);
         SDL_LockMutex(store.mutex);
         if (r.generation != SDL_AtomicGet(&store.generation)) continue;
         store.view.minimum = minimum;
@@ -99,7 +129,11 @@ static int run(void *unused)
         SDL_UnlockMutex(store.mutex);
         wake_page();
         snprintf(url, sizeof(url), "https://store.steampowered.com/saleaction/ajaxgetdeckappcompatibilityreport?nAppID=%u", app);
-        ok = fetch(curl, url, &r, "deck") && steam_compat_parse_deck(r.bytes, r.size, app, &category);
+        fetched = fetch(curl, url, &r, app, "deck");
+        ok = fetched && steam_compat_parse_deck(r.bytes, r.size, app, &category);
+        network_diag("stage=steam.compat.deck.parse appid=%u result=%s category=%d rating=\"%s\"",
+                     app, !fetched ? "not_fetched" : ok ? "ok" : "invalid",
+                     ok ? (int)category : -1, ok ? steam_compat_deck_rating(category) : "-");
         SDL_LockMutex(store.mutex);
         if (r.generation != SDL_AtomicGet(&store.generation)) continue;
         store.view.deck_category = category;

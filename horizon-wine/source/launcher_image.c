@@ -7,6 +7,25 @@
 #define IMAGE_MAX_BYTES (16u * 1024u * 1024u)
 #define IMAGE_MAX_SIDE 2048
 
+/* Adobe APP14 identifies inverted CMYK samples. Walk header segments only;
+ * a string inside EXIF, ICC data or compressed pixels is not a marker. */
+static int jpeg_adobe_marker( const unsigned char *data, size_t size )
+{
+    size_t pos = 2;
+    while (pos < size && data[pos] == 0xff)
+    {
+        while (pos < size && data[pos] == 0xff) ++pos;
+        if (size - pos < 3) break;
+        int marker = data[pos++];
+        if (marker == 0xda || marker == 0xd9) break;
+        size_t length = (size_t)data[pos] * 256 + data[pos + 1];
+        if (length < 2 || length > size - pos) break;
+        if (marker == 0xee && length >= 14 && !memcmp( data + pos + 2, "Adobe", 5 )) return 1;
+        pos += length;
+    }
+    return 0;
+}
+
 int launcher_image_decode( const void *data, size_t size, struct launcher_icon *icon )
 {
     struct launcher_icon decoded = {0};
@@ -37,9 +56,22 @@ int launcher_image_decode( const void *data, size_t size, struct launcher_icon *
             decoded.width > 0 && decoded.height > 0 && decoded.width <= IMAGE_MAX_SIDE && decoded.height <= IMAGE_MAX_SIDE)
         {
             decoded.size = (size_t)decoded.width * decoded.height * 4;
+            int cmyk = space == TJCS_CMYK || space == TJCS_YCCK;
             if ((decoded.data = malloc( decoded.size )))
                 ok = !tjDecompress2( decoder, data, size, decoded.data, decoded.width, 0, decoded.height,
-                                    TJPF_RGBA, TJFLAG_FASTDCT | TJFLAG_LIMITSCANS );
+                                    cmyk ? TJPF_CMYK : TJPF_RGBA, TJFLAG_FASTDCT | TJFLAG_LIMITSCANS );
+            if (ok && cmyk)
+            {
+                int inverted = space == TJCS_YCCK || jpeg_adobe_marker( data, size );
+                for (size_t i = 0; i < decoded.size; i += 4)
+                {
+                    unsigned char *pixel = decoded.data + i;
+                    unsigned int k = inverted ? pixel[3] : 255 - pixel[3];
+                    for (int c = 0; c < 3; c++)
+                        pixel[c] = ((inverted ? pixel[c] : 255 - pixel[c]) * k + 127) / 255;
+                    pixel[3] = 255;
+                }
+            }
         }
         tjDestroy( decoder );
     }

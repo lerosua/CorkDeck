@@ -37,6 +37,9 @@ static unsigned char key[32];
 static char hashtext[2][41];
 static int cancel_at_commit, explicit_discard, cancel_after_first, deny, requests, handles,cleanups,auth_required,auth_requests;
 static long status;
+static const char *fixture_location;
+enum edge_auth_mode { EDGE_OPEN, EDGE_GRANT, EDGE_DENY_GRANT, EDGE_REJECT_TOKEN };
+static enum edge_auth_mode edge_auth;
 static struct steam_download_view result;
 static struct transfer *active;
 static char url[2048];
@@ -57,6 +60,37 @@ static CURLcode fixture_perform(CURL *c) {
   size_t i;
   (void)c;
   ++requests;
+  if (!strcmp(url, "https://backup.example.com/depot/124/manifest/999/5/test")) {
+    status = 200;
+    return write_data("backup archive", 1, 14, active) == 14 ? CURLE_OK : CURLE_WRITE_ERROR;
+  }
+  if (!strcmp(url, "https://one.example.com/directory-auth")) {
+    status = 403;
+    return CURLE_OK;
+  }
+  if (!strcmp(url, "https://one.example.com/directory-auth?grant=directory-only")) {
+    status = 200;
+    return CURLE_OK;
+  }
+  if (fixture_location) {
+    if (!strcmp(url, "https://one.example.com/start?fixture=test")) {
+      status = 302;
+      return write_data("redirect body", 1, 13, active) == 13 ? CURLE_OK : CURLE_WRITE_ERROR;
+    }
+    if (edge_auth != EDGE_OPEN) {
+      if (!strcmp(url, fixture_location) || edge_auth == EDGE_REJECT_TOKEN) {
+        status = 403;
+        return CURLE_OK;
+      }
+      assert(!strcmp(url, "https://edge.example.com/data?dest=t%2Fb&route=x&grant=edge-only"));
+    } else assert(!strcmp(url, "https://edge.example.com/data?dest=test"));
+    status = 200;
+    return write_data("archive", 1, 7, active) == 7 ? CURLE_OK : CURLE_WRITE_ERROR;
+  }
+  if (strstr(url, "/manifest/")) {
+    status = 0;
+    return CURLE_PEER_FAILED_VERIFICATION;
+  }
   status=auth_required&&!strstr(url,"fixture=test")?403:200;
   if(status==403)return CURLE_OK;
   for (i = 0; i < 2; ++i)
@@ -75,6 +109,10 @@ static CURLcode fixture_getinfo(CURL *c, CURLINFO info, ...) {
   va_start(ap, info);
   if (info == CURLINFO_STARTTRANSFER_TIME || info == CURLINFO_TOTAL_TIME)
     *va_arg(ap, double *) = info == CURLINFO_STARTTRANSFER_TIME ? 0.01 : 0.02;
+  else if (info == CURLINFO_REDIRECT_URL)
+    *va_arg(ap, char **) = (char *)fixture_location;
+  else if (info == CURLINFO_SSL_VERIFYRESULT)
+    *va_arg(ap, long *) = status ? 0 : 8;
   else {
     assert(info == CURLINFO_RESPONSE_CODE || info == CURLINFO_NUM_CONNECTS);
     *va_arg(ap, long *) = info==CURLINFO_RESPONSE_CODE?status:0;
@@ -117,20 +155,39 @@ int steam_backend_depot(struct steam_backend *b, uint32_t app,
   *code = 1;
   return 1;
 }
-int steam_backend_servers(struct steam_backend *b, char hosts[8][128],
+int steam_backend_servers(struct steam_backend *b, uint32_t cell, struct steam_cdn_server hosts[8],
                           size_t *n) {
-  (void)b;
-  strcpy(hosts[0], "fixture.steamcontent.com");
+  if (cell != b->cell_id) {
+    assert(cell == 1);
+    strcpy(hosts[0].host, "two.example.com");
+    strcpy(hosts[0].vhost, hosts[0].host);
+    strcpy(hosts[1].host, "http-only.example.com");
+    strcpy(hosts[1].vhost, hosts[1].host);
+    strcpy(hosts[2].host, "backup.example.com");
+    strcpy(hosts[2].vhost, hosts[2].host);
+    b->tls_hosts = 5; b->plain_hosts = 2; *n = 3;
+    return 1;
+  }
+  strcpy(hosts[0].host, "fixture.steamcontent.com");
+  strcpy(hosts[0].vhost, hosts[0].host);
   *n = 1;
   return 1;
 }
 int steam_backend_cdn_auth(struct steam_backend *b, uint32_t app,
                            uint32_t depot, const char *host, char token[1024]) {
-  (void)b;
-  (void)app;
-  (void)depot;
-  (void)host;
   ++auth_requests;
+  if (!strcmp(host, "directory.example.com")) {
+    assert(app == 222420 && depot == 124);
+    strcpy(token, "?grant=directory-only");
+    return 1;
+  }
+  if (fixture_location) {
+    assert(edge_auth != EDGE_OPEN && !strcmp(host, "edge.example.com"));
+    assert(app == 222420 && depot == 124);
+    if (edge_auth == EDGE_DENY_GRANT) {b->error = 1015; return 0;}
+    strcpy(token, "?grant=edge-only");
+    return 1;
+  }
   if(auth_required){strcpy(token,"?fixture=test");return 1;}return 0;
 }
 static int fixture_tick(void *c) {
@@ -231,6 +288,61 @@ int main(void) {
   struct steam_backend b = {.account = 99, .language="english"};
   struct steam_install_callbacks cb = {.tick = fixture_tick,
                                        .progress = fixture_progress};
+  /* Exercise the manifest HTTPS path before fixtures() fills the SD cache.
+   * Two different hosts fail verification in both rounds. */
+  const struct steam_cdn_server hosts[8] = {{"directory.example.com","one.example.com"},{"two.example.com","two.example.com"}};
+  struct cdn_session session = {0};
+  struct steam_download_view manifest_view = {0};
+  struct transfer manifest = {.cdn=&session,.backend=&b,.app=222420,.depot=124,.cb=&cb,.view=&manifest_view};
+  assert(!fetch(hosts, 2, "depot/124/manifest/999/5/private-fixture-code", &manifest));
+  assert(manifest_view.requests == 4 && manifest_view.transport == CURLE_PEER_FAILED_VERIFICATION);
+  assert(fetch(hosts, 1, "directory-auth", &manifest));
+  assert(auth_requests == 1 && manifest_view.requests == 6);
+  auth_requests = 0;
+  fixture_location = "https://edge.example.com/data?dest=test";
+  strcpy(session.tokens[0], "?fixture=test");
+  manifest.capacity = 128;
+  manifest.file = tmpfile();
+  assert(manifest.file);
+  assert(fetch(hosts, 1, "start", &manifest));
+  rewind(manifest.file);
+  assert(fread(readback, 1, sizeof(readback), manifest.file) == 7 && !memcmp(readback, "archive", 7));
+  fixture_location = "https://edge.example.com/data?grant=old&dest=t%2Fb&route=x#part";
+  edge_auth = EDGE_GRANT;
+  unsigned before = manifest_view.requests;
+  assert(fetch(hosts, 1, "start", &manifest));
+  assert(manifest_view.requests == before + 3 && auth_requests == 1);
+  assert(!strcmp(session.tokens[0], "?fixture=test") && manifest.used == 7);
+  rewind(manifest.file);
+  assert(fread(readback, 1, sizeof(readback), manifest.file) == 7 && !memcmp(readback, "archive", 7));
+
+  edge_auth = EDGE_REJECT_TOKEN;
+  before = manifest_view.requests;
+  assert(!fetch(hosts, 1, "start", &manifest) && manifest_view.requests == before + 6);
+  assert(auth_requests == 3 && manifest_view.error == 1009);
+  edge_auth = EDGE_DENY_GRANT;
+  before = manifest_view.requests;
+  assert(!fetch(hosts, 1, "start", &manifest) && manifest_view.requests == before + 4);
+  assert(auth_requests == 5 && !strcmp(session.tokens[0], "?fixture=test"));
+
+  edge_auth = EDGE_OPEN;
+  fixture_location = "http://edge.example.com/data";
+  before = manifest_view.requests;
+  assert(!fetch(hosts, 1, "start", &manifest) && manifest_view.requests == before + 2);
+  fixture_location = NULL;
+  struct steam_cdn_server regional[8] = {hosts[0],hosts[1]};
+  size_t count = 2;
+  b.tls_hosts = 3;
+  before = manifest_view.requests;
+  assert(fetch_manifest(regional, &count, "depot/124/manifest/999/5/test", &manifest));
+  assert(manifest_view.requests == before + 5 && !manifest_view.error && session.alternate_directory_tried);
+  assert(count == 1 && !strcmp(regional[0].vhost, "backup.example.com"));
+  assert(b.tls_hosts == 1 && !b.plain_hosts && !session.tokens[0][0]);
+  rewind(manifest.file);
+  assert(fread(readback, 1, sizeof(readback), manifest.file) == 14 && !memcmp(readback, "backup archive", 14));
+  fclose(manifest.file);
+  fixture_cleanup(session.curl);
+  requests = 0;
   assert(mkdtemp(root));
   fixtures(root);
   language_missing=1;

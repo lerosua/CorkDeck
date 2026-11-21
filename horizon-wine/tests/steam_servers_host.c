@@ -21,17 +21,16 @@ int steam_cm_request(struct steam_cm *cm,uint32_t type,uint64_t account,uint32_t
  (void)cm;(void)type;(void)account;(void)session;(void)job;(void)data;(void)size;(void)out;return 0;}
 unsigned int steam_cm_error(const struct steam_cm *cm){(void)cm;return 6;}
 int main(void){
- unsigned char entry[200];char hosts[8][128];size_t count;
+ unsigned char entry[200];struct steam_cdn_server hosts[8];size_t count;
  struct steam_backend b={0};struct steam_wire_writer w={entry,sizeof(entry),0,0},r={reply,sizeof(reply),0,0};
  steam_wire_bytes(&w,1,"CDN",3);steam_wire_bytes(&w,8,"cache1.steamcontent.com",strlen("cache1.steamcontent.com"));
  steam_wire_bytes(&w,12,"mandatory",9);steam_wire_bytes(&r,1,entry,w.size);reply_size=r.size;
- expected_cell=47;b.cell_id=47;assert(steam_backend_servers(&b,hosts,&count));
- assert(count==1&&!strcmp(hosts[0],"cache1.steamcontent.com"));
- expected_cell=0;b.cell_id=0;assert(steam_backend_servers(&b,hosts,&count));
+ expected_cell=47;b.cell_id=47;assert(steam_backend_servers(&b,expected_cell,hosts,&count));
+ assert(count==1&&!strcmp(hosts[0].host,"cache1.steamcontent.com"));
+ expected_cell=0;assert(steam_backend_servers(&b,expected_cell,hosts,&count));
  /* Many regions are given Valve's own servers only, which are "SteamCache",
   * and some a contracted network under another domain: both are taken. A
-  * server for Steam China, a proxy, one kept for some applications, one
-  * reached under another name, another kind and a name that is no DNS name
+  * server for Steam China, a proxy, one kept for some applications, another kind and a name that is no DNS name
   * are passed over without spoiling the list. */
  {
   static const struct { const char *type,*host,*https,*vhost; int field; } servers[]={
@@ -40,7 +39,8 @@ int main(void){
    {"CDN","china.example.com","mandatory",NULL,7},
    {"CDN","proxy.example.com","mandatory",NULL,10},
    {"CDN","apps.example.com","mandatory",NULL,13},
-   {"CDN","10.0.0.7","mandatory","lancache.example.com",0},
+   {"CDN","edge.example.com","mandatory","DOWNLOAD.example.com",0},
+   {"CDN","edge.example.com","mandatory","bad/name.example.com",0},
    {"OpenCache","open.example.com","mandatory",NULL,0},
    {"CDN","bad_name.example.com","mandatory",NULL,0},
    {"CDN","nodots","mandatory",NULL,0},
@@ -53,13 +53,15 @@ int main(void){
    if(servers[i].field)steam_wire_uint(&w,servers[i].field,1);
    steam_wire_bytes(&w,12,servers[i].https,strlen(servers[i].https));steam_wire_bytes(&all,1,entry,w.size);}
   assert(!all.failed&&all.size<=sizeof(reply));memcpy(reply,big,all.size);reply_size=all.size;
-  assert(steam_backend_servers(&b,hosts,&count)&&count==3);
-  assert(!strcmp(hosts[0],"cache2-fra1.steamcontent.com")&&!strcmp(hosts[1],"steampipe.akamaized.net")&&!strcmp(hosts[2],"plain.steamcontent.com"));
-  assert(b.tls_hosts==3&&b.plain_hosts==6);
+  assert(steam_backend_servers(&b,expected_cell,hosts,&count)&&count==4);
+  assert(!strcmp(hosts[0].host,"cache2-fra1.steamcontent.com")&&!strcmp(hosts[1].host,"steampipe.akamaized.net")&&!strcmp(hosts[3].host,"plain.steamcontent.com"));
+  assert(!strcmp(hosts[2].host,"edge.example.com")&&!strcmp(hosts[2].vhost,"download.example.com"));
+  assert(!strcmp(hosts[1].vhost,hosts[1].host));
+  assert(b.tls_hosts==7&&b.plain_hosts==10);
   /* Nothing usable is still the error it was. */
   w=(struct steam_wire_writer){entry,sizeof(entry),0,0};r=(struct steam_wire_writer){reply,sizeof(reply),0,0};
   steam_wire_bytes(&w,1,"OpenCache",9);steam_wire_bytes(&w,8,"open.example.com",16);steam_wire_bytes(&r,1,entry,w.size);reply_size=r.size;
-  assert(!steam_backend_servers(&b,hosts,&count)&&b.error==3004&&!count);
+  assert(!steam_backend_servers(&b,expected_cell,hosts,&count)&&b.error==3004&&!count);
  }
  puts("Authenticated CM cell routing reaches CDN discovery, with zero-cell fallback");return 0;
 }

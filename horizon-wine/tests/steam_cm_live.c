@@ -6,7 +6,7 @@ int main(void)
 {
     unsigned int error=0; unsigned char body[128],packet[512];size_t written;
     struct steam_wire_writer w={body,sizeof(body),0,0};struct steam_cm_message response;
-    struct steam_cm *cm=steam_cm_connect(NULL,NULL,&error);
+    struct steam_cm *cm=steam_cm_connect(NULL,NULL,NULL,&error);
     if(!cm){printf("CM connection error=%u\n",error);return 1;}
     steam_wire_bytes(&w,1,"autorun-integration-probe",25);
     if(!steam_cm_auth_request(STEAM_AUTH_RSA,1,body,w.size,packet,sizeof(packet),&written) ||

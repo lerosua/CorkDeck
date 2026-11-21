@@ -83,7 +83,7 @@ enum shell_tab { SHELL_HOME, SHELL_LIBRARY, SHELL_STEAM, SHELL_DOWNLOADS, SHELL_
 enum zone { ZONE_HEADER, ZONE_CONTENT };
 
 /* The icons drawn from assets/ (launcher_icons.h), made once at the size they are shown. */
-enum symbol { SYMBOL_HOME, SYMBOL_LIBRARY, SYMBOL_STEAM, SYMBOL_DOWNLOADS, SYMBOL_ADD, SYMBOL_SETTINGS, SYMBOL_COUNT };
+enum symbol { SYMBOL_HOME, SYMBOL_LIBRARY, SYMBOL_STEAM, SYMBOL_DOWNLOADS, SYMBOL_ADD, SYMBOL_SETTINGS, SYMBOL_STEAM_STATUS, SYMBOL_COUNT };
 
 enum icon_state { ICON_UNKNOWN, ICON_QUEUED, ICON_READY, ICON_MISSING };
 enum art_kind { ART_PORTRAIT, ART_SQUARE, ART_HERO };
@@ -1118,7 +1118,7 @@ static void draw_wifi( struct ui *ui, int x, int cy, unsigned int bars, int offl
 static int draw_network_status( struct ui *ui, struct nx_network net, int right, int cy )
 {
     int x = right - 13;
-    ui->status_visible = 1;
+    if (!ui->status_refresh_ms) ui->status_refresh_ms = 1000;
     switch (net.link)
     {
     case NX_LINK_WIFI:
@@ -2851,6 +2851,7 @@ int wine_nx_launcher_run( struct wine_nx_launcher_options *options, char *target
             [SYMBOL_DOWNLOADS] = { &icon_download, SHELL_ICON - 4 },
             [SYMBOL_ADD] = { &icon_plus, SHELL_ICON - 4 },
             [SYMBOL_SETTINGS] = { &icon_sliders, SHELL_ICON - 4 },
+            [SYMBOL_STEAM_STATUS] = { &icon_steam, 26 },
         };
 
         for (i = 0; i < SYMBOL_COUNT; i++)

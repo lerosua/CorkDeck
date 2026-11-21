@@ -1,5 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
-#include "steam_cm.h"
+#include "steam_cm_route.h"
 #include "../network_diag_curl.h"
 #include "steam_crypto.h"
 #include <curl/curl.h>
@@ -15,6 +15,8 @@
 
 struct steam_cm {
     CURL *curl;
+    struct steam_cm_route *route;
+    char endpoint[128];
     wslay_event_context_ptr ws;
     steam_cancel_fn cancel;
     void *context;
@@ -112,10 +114,12 @@ static void message(wslay_event_context_ptr ctx,const struct wslay_event_on_msg_
 {
     struct steam_cm *c=opaque; (void)ctx;
     if(arg->opcode==WSLAY_BINARY_FRAME) packet(c,arg->msg,arg->msg_length,0);
-    else if(arg->opcode==WSLAY_CONNECTION_CLOSE || arg->opcode==WSLAY_TEXT_FRAME) c->error=2;
+    else if(arg->opcode==WSLAY_CONNECTION_CLOSE) c->error=2;
+    else if(arg->opcode==WSLAY_TEXT_FRAME) c->error=3;
 }
 int steam_cm_tick(struct steam_cm *c)
 {
+    if(c->route) steam_cm_route_release(&c->route, 0);
     if(!alive(c)) return 0;
     if(wslay_event_send(c->ws) || wslay_event_recv(c->ws)) {if(!c->error)c->error=2;}
     return alive(c);
@@ -160,6 +164,7 @@ int steam_cm_exchange(struct steam_cm *c,const void *data,size_t size,uint64_t j
 void steam_cm_close(struct steam_cm *c)
 {
     if(!c)return;
+    if(c->route) steam_cm_route_release(&c->route, 1);
     if(c->ws)wslay_event_context_free(c->ws);
     if(c->curl)curl_easy_cleanup(c->curl);
     steam_secret_clear(c->reply,c->reply_size);free(c->reply);
@@ -193,7 +198,7 @@ static int raw_send(struct steam_cm *c,const char *data,size_t size,uint64_t dea
 {
     while(size && alive(c)) {
         size_t n=0;CURLcode r=curl_easy_send(c->curl,data,size,&n);
-        if(now_ms()>deadline || (r && r!=CURLE_AGAIN)) return 0;
+        if(now_ms()>deadline || (r && r!=CURLE_AGAIN)) {c->error=2;return 0;}
         data+=n;size-=n;if(!n)pause_io();
     }
     return alive(c);
@@ -215,10 +220,11 @@ static int upgrade(struct steam_cm *c,const char *endpoint)
     while(used<sizeof(headers)-1 && alive(c) && now_ms()<deadline) {
         CURLcode r=curl_easy_recv(c->curl,headers+used,1,&n);
         if(r==CURLE_AGAIN){pause_io();continue;}
-        if(r || !n)return 0;
+        if(r || !n){c->error=2;return 0;}
         used+=n;headers[used]=0;
         if(used>=4 && !memcmp(headers+used-4,"\r\n\r\n",4))break;
     }
+    if(now_ms()>=deadline){c->error=6;return 0;}
     if(used>=4 && !strcmp(headers+used-4,"\r\n\r\n")) {
         int status=0;
         if(sscanf(headers,"HTTP/%*u.%*u %3d",&status)==1)
@@ -237,54 +243,48 @@ static int upgrade(struct steam_cm *c,const char *endpoint)
     }
     return found==7;
 }
-static unsigned int discover_transport;
-unsigned int steam_cm_connect_transport(void){return discover_transport;}
-struct steam_cm *steam_cm_connect(steam_cancel_fn cancel,void *context,unsigned int *error)
+void steam_cm_adopt(struct steam_cm *c, steam_cancel_fn cancel, void *context,
+                   struct steam_cm_route *route)
 {
-    struct steam_servers servers;struct steam_probe_result result;unsigned int i;
+    c->cancel = cancel;
+    c->context = context;
+    c->route = route;
+}
+
+const char *steam_cm_endpoint(const struct steam_cm *c) { return c->endpoint; }
+
+struct steam_cm *steam_cm_dial(const char *endpoint, steam_cancel_fn cancel, void *context,
+                              unsigned int *error, unsigned int *transport)
+{
     const struct wslay_event_callbacks cb={.recv_callback=ws_recv,.send_callback=ws_send,.genmask_callback=mask,.on_msg_recv_callback=message};
-    /* The console's network may come up a moment after the launcher does:
-     * only an unreachable directory is asked again, twice, a little later. */
-    for(i=0;;++i){
-        uint64_t until;
-        steam_discover(&result,&servers,cancel,context);
-        network_diag( "stage=steam.discovery attempt=%u result=%u servers=%u", i+1, (unsigned)result.code, servers.count );
-        discover_transport=result.transport_code;
-        if(result.code!=STEAM_NETWORK||i==2)break;
-        for(until=now_ms()+1500*(i+1);now_ms()<until&&!(cancel&&cancel(context));)pause_io();
-    }
-    if(result.code!=STEAM_OK){*error=100+(unsigned int)result.code;return NULL;}
-    for(i=0;i<servers.count && i<3;++i) {
-        struct steam_cm *c=calloc(1,sizeof(*c));char url[192];CURLcode rc;
-        if(!c){*error=5;return NULL;}
-        c->cancel=cancel;c->context=context;c->curl=curl_easy_init();
-        if(!c->curl){steam_cm_close(c);*error=5;return NULL;}
-        snprintf(url,sizeof(url),"https://%s/cmsocket/",servers.endpoint[i]);
+    struct steam_cm *c=calloc(1,sizeof(*c));char url[192];CURLcode rc;
+    if(!c){*error=5;return NULL;}
+    c->cancel=cancel;c->context=context;c->curl=curl_easy_init();
+    if(!c->curl){steam_cm_close(c);*error=5;return NULL;}
+    snprintf(url,sizeof(url),"https://%s/cmsocket/",endpoint);
 #define OPT(k,v) do { if(curl_easy_setopt(c->curl,k,v)) {c->error=7;goto failed;} }while(0)
-        OPT(CURLOPT_URL,url);OPT(CURLOPT_PROXY,"");OPT(CURLOPT_NETRC,(long)CURL_NETRC_IGNORED);
-        OPT(CURLOPT_CONNECT_ONLY,1L);OPT(CURLOPT_SSL_VERIFYPEER,1L);OPT(CURLOPT_SSL_VERIFYHOST,2L);
-        OPT(CURLOPT_PROTOCOLS,(long)CURLPROTO_HTTPS);OPT(CURLOPT_FOLLOWLOCATION,0L);
-        OPT(CURLOPT_HTTP_VERSION,(long)CURL_HTTP_VERSION_1_1);
-        OPT(CURLOPT_CONNECTTIMEOUT,10L);OPT(CURLOPT_TIMEOUT,15L);OPT(CURLOPT_NOSIGNAL,1L);
-        OPT(CURLOPT_NOPROGRESS,0L);OPT(CURLOPT_XFERINFOFUNCTION,progress);OPT(CURLOPT_XFERINFODATA,c);
-        rc=curl_easy_perform(c->curl);
-        network_diag_curl( "steam.cm.connect", c->curl, rc );
-        if(rc){c->error=200+(unsigned int)rc;goto failed;}
-        if(!upgrade(c,servers.endpoint[i])){c->error=8;goto failed;}
-        if(wslay_event_context_client_init(&c->ws,&cb,c)){c->error=5;goto failed;}
-        wslay_event_config_set_max_recv_msg_length(c->ws,STEAM_CM_PACKET_MAX);
-        {
-            unsigned char body[8];struct steam_wire_writer w={body,sizeof(body),0,0};
-            steam_wire_uint(&w,1,65580);
-            if(!steam_cm_send(c,9805,0,0,body,w.size))goto failed;
-        }
-        network_diag( "stage=steam.cm.ready attempt=%u", i+1 );
-        *error=0;return c;
-failed:
-        network_diag( "stage=steam.cm.failed attempt=%u error=%u", i+1, c->error );
-        *error=c->error;steam_cm_close(c);
-        if(cancel && cancel(context)){*error=1;break;}
-#undef OPT
+    OPT(CURLOPT_URL,url);OPT(CURLOPT_PROXY,"");OPT(CURLOPT_NETRC,(long)CURL_NETRC_IGNORED);
+    OPT(CURLOPT_CONNECT_ONLY,1L);OPT(CURLOPT_SSL_VERIFYPEER,1L);OPT(CURLOPT_SSL_VERIFYHOST,2L);
+    OPT(CURLOPT_PROTOCOLS,(long)CURLPROTO_HTTPS);OPT(CURLOPT_FOLLOWLOCATION,0L);
+    OPT(CURLOPT_HTTP_VERSION,(long)CURL_HTTP_VERSION_1_1);
+    OPT(CURLOPT_CONNECTTIMEOUT,10L);OPT(CURLOPT_TIMEOUT,15L);OPT(CURLOPT_NOSIGNAL,1L);
+    OPT(CURLOPT_NOPROGRESS,0L);OPT(CURLOPT_XFERINFOFUNCTION,progress);OPT(CURLOPT_XFERINFODATA,c);
+    rc=curl_easy_perform(c->curl);
+    *transport=(unsigned int)rc;
+    network_diag_curl( "steam.cm.connect", c->curl, rc );
+    if(rc){c->error=200+(unsigned int)rc;goto failed;}
+    if(!upgrade(c,endpoint)){if(!c->error)c->error=8;goto failed;}
+    if(wslay_event_context_client_init(&c->ws,&cb,c)){c->error=5;goto failed;}
+    wslay_event_config_set_max_recv_msg_length(c->ws,STEAM_CM_PACKET_MAX);
+    {
+        unsigned char body[8];struct steam_wire_writer w={body,sizeof(body),0,0};
+        steam_wire_uint(&w,1,65580);
+        if(!steam_cm_send(c,9805,0,0,body,w.size))goto failed;
     }
+    strcpy(c->endpoint,endpoint);
+    *error=0;return c;
+failed:
+    *error=c->error;steam_cm_close(c);
+#undef OPT
     return NULL;
 }

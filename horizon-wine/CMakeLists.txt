@@ -675,8 +675,8 @@ target_sources(wine-nx-runtime PRIVATE
     source/app/app_settings.c source/app/app_records.c
     source/steam/steam_probe.c source/steam/steam_directory.c source/steam/steam_ui.c
     source/steam/steam_wire.c source/steam/steam_cm_message.c source/steam/steam_auth.c
-    source/steam/steam_cm.c source/steam/steam_crypto.c source/steam/steam_provider.c
-    source/steam/steam_library.c source/steam/steam_app.c source/steam/steam_backend.c
+    source/steam/steam_cm.c source/steam/steam_cm_route.c source/steam/steam_crypto.c source/steam/steam_provider.c
+    source/steam/steam_library.c source/steam/steam_library_cache.c source/steam/steam_app.c source/steam/steam_backend.c
     source/steam/steam_family.c source/steam/steam_settings.c source/steam/steam_session.c source/steam/steam_device_key.c
     source/steam/steam_content.c source/steam/steam_manifest.c source/steam/steam_install.c source/steam/steam_storage.c source/steam/steam_engine.c
     source/steam/steam_library_ui.c source/steam/steam_prerequisites.c source/steam/steam_prerequisites_ui.c source/steam/steam_local.c
@@ -895,7 +895,7 @@ if(WINE_NX_SWAP_POC)
     endforeach()
 endif()
 target_link_options(wine-nx-runtime PRIVATE -Wl,--gc-sections -Wl,--wrap=svcCreateThread
-    -Wl,--wrap=svcSetThreadCoreMask
+    -Wl,--wrap=svcSetThreadCoreMask -Wl,--wrap=sslConnectionGetVerifyCertError
     -Wl,--wrap=virtmemFindAslr -Wl,--wrap=virtmemFindCodeMemory
     -Wl,--wrap=virtmemFindStack -Wl,--wrap=virtmemAddReservation -Wl,--wrap=virtmemRemoveReservation)
 
@@ -1000,7 +1000,7 @@ set_source_files_properties(source/launcher.c source/launcher_catalog.c source/l
     COMPILE_DEFINITIONS _REENTRANT)
 # The mark in the corner is only there in the build that generates it.
 set_property(SOURCE source/launcher.c APPEND PROPERTY COMPILE_DEFINITIONS WINE_NX_HAS_EMBEDDED_LOGO)
-set_source_files_properties(source/steam/steam_prerequisites_ui.c source/steam/steam_ui.c source/steam/steam_provider.c source/steam/steam_library_ui.c source/steam/steam_install.c source/steam/steam_engine.c source/steam/steam_content.c source/steam/steam_artwork.c source/steam/steam_compat_store.c PROPERTIES
+set_source_files_properties(source/steam/steam_cm_route.c source/steam/steam_prerequisites_ui.c source/steam/steam_ui.c source/steam/steam_provider.c source/steam/steam_library_ui.c source/steam/steam_install.c source/steam/steam_engine.c source/steam/steam_content.c source/steam/steam_artwork.c source/steam/steam_compat_store.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"
     COMPILE_DEFINITIONS _REENTRANT)
 target_link_libraries(wine-nx-runtime PRIVATE

@@ -10,6 +10,8 @@ struct steam_probe_result {
     long http_status;
     unsigned int transport_code;
 };
+/* Physical network link, 1 up, 0 down, -1 unavailable. */
+int steam_link_connected(void);
 typedef int (*steam_cancel_fn)(void *context);
 #define STEAM_CM_SERVERS 8
 struct steam_servers { char endpoint[STEAM_CM_SERVERS][128]; unsigned int count; };

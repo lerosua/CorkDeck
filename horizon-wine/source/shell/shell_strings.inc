@@ -12,6 +12,15 @@ static enum app_language shell_language_from_code( const char *code )
 static const char *const shell_strings[][APP_LANG_COUNT] =
 {
     /* The shell */
+    { "Restoring Steam session", "Steam · Восстановление сеанса", "正在恢复 Steam 会话" },
+    { "Steam sign-in failed", "Steam · Ошибка входа", "Steam 登录失败" },
+    { "Steam signed in", "Steam · В сети", "Steam 已登录" },
+    { "Steam awaiting confirmation", "Steam · Ожидает подтверждения", "Steam 等待确认" },
+    { "Steam signing in", "Steam · Выполняется вход", "Steam 正在登录" },
+    { "Steam offline - waiting to reconnect", "Steam · Ожидание подключения", "Steam 离线，等待重连" },
+    { "Steam offline", "Steam · Нет связи", "Steam 离线" },
+    { "Steam signed out", "Steam · Вход не выполнен", "Steam 未登录" },
+    { "The library will appear when it is ready.", "Игры появятся после загрузки библиотеки.", "游戏库加载后会自动显示。" },
     { "Home", "Главная", "首页" }, { "Library", "Библиотека", "游戏库" }, { "Downloads", "Загрузки", "下载" }, { "Settings", "Настройки", "设置" },
     { "Maintenance", "Обслуживание", "维护" }, { "Storage", "Хранилище", "存储" }, { "Diagnostics", "Диагностика", "诊断" },
     { "Power", "Питание", "电源" }, { "Menu", "Меню", "菜单" }, { "Panel", "Панель", "面板" }, { "Search", "Поиск", "搜索" },

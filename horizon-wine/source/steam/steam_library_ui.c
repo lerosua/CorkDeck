@@ -146,7 +146,6 @@ static const char *store_status(enum store_state state)
 
 static void draw_compatibility(struct ui *ui, uint32_t app)
 {
-    static const char *const ratings[] = {"Not rated", "Unsupported", "Playable", "Verified"};
     struct steam_compat_view view;
     char line[544];
     steam_compat_status(app, &view);
@@ -174,7 +173,7 @@ static void draw_compatibility(struct ui *ui, uint32_t app)
         snprintf(line, sizeof(line), "GPU   %s", m->graphics);
         ui_text_fit(ui, ui->small, 438, 368, 745, line, ui->dim, 1);
     }
-    const char *deck = view.deck == STORE_READY ? ratings[view.deck_category] : store_status(view.deck);
+    const char *deck = view.deck == STORE_READY ? steam_compat_deck_rating(view.deck_category) : store_status(view.deck);
     snprintf(line, sizeof(line), "Steam Deck   %s", ui_translate(ui, deck));
     ui_text_fit(ui, ui->normal, 438, 406, 745, line, ui->value, 0);
 }

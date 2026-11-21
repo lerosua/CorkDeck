@@ -24,6 +24,7 @@ static uint32_t registered_app,removed_generation;
 static Uint32 diagnostic_tick;
 static uint32_t diagnostic_app;
 static enum steam_download_state diagnostic_state;
+static enum steam_status diagnostic_auth_state;
 static unsigned int diagnostic_error;
 static int diagnostic(const char *,const struct steam_status_view *);
 static void removal_diagnostic(const char *root,const struct steam_remove_view *v){
@@ -60,6 +61,7 @@ static const char *status_text(enum steam_status state)
     case STEAM_CONFIRM_DEVICE:return "Waiting for Steam confirmation...";
     case STEAM_LOGGING_ON:return "Confirming account session with Steam...";
     case STEAM_ONLINE:return "OK - Signed in to Steam";
+    case STEAM_WAIT_NETWORK:return "Steam offline - waiting to reconnect";
     case STEAM_ERROR:return "Steam sign-in failed. See the error below.";
     default:return "Not signed in";
     }
@@ -208,12 +210,14 @@ void steam_ui_tick(struct ui *ui,const char *root)
       else if(launcher.unregister_directory&&!launcher.unregister_directory(launcher.context,removal.directory))ui_toast(ui,"Files removed; catalog save failed. Remove the missing entry in CorkDeck.",6000);
       else ui_toast(ui,"Steam game uninstalled.",4000);}}
 
-    if (!diagnostic_tick || SDL_GetTicks()-diagnostic_tick >= 5000 ||
+    steam_provider_status(provider,&auth);
+    if (!diagnostic_tick || diagnostic_auth_state != auth.state || SDL_GetTicks()-diagnostic_tick >= 5000 ||
         diagnostic_app != d.app_id || diagnostic_error != d.error ||
         (diagnostic_state != d.state && (d.state == STEAM_DOWNLOAD_COMPLETE ||
          d.state == STEAM_DOWNLOAD_CANCELLED || d.state == STEAM_DOWNLOAD_ERROR)))
     {
-        steam_provider_status(provider,&auth);diagnostic(root,&auth);
+        diagnostic(root,&auth);
+        diagnostic_auth_state=auth.state;
         diagnostic_tick=SDL_GetTicks();diagnostic_app=d.app_id;
         diagnostic_state=d.state;diagnostic_error=d.error;
     }
@@ -587,7 +591,7 @@ void steam_ui_open(struct ui *ui,const char *root)
             ui_text(ui,ui->small,108,372,"Press X to log out of this session.",ui->dim);
         }
         if(view.state!=STEAM_ONLINE)ui_text(ui,ui->small,104,578,status_text(view.state),ui->text);
-        if(view.error){
+        if(view.error && view.state!=STEAM_WAIT_NETWORK){
             const char *reason=view.error==102 && view.transport_error==CURLE_OPERATION_TIMEDOUT
                 ? "The Steam server directory timed out. Press A to retry."
                 : error_text(view.error);
@@ -626,18 +630,26 @@ int steam_ui_resume(uint32_t app_id){return provider&&app_id&&steam_provider_ins
 int steam_ui_busy(uint32_t app_id){return provider&&steam_provider_busy(provider,app_id);}
 int steam_ui_forget_install(uint32_t app_id){return !provider||steam_provider_forget_install(provider,app_id);}
 void steam_ui_note_install(uint32_t app_id){if(provider)steam_provider_note_install(provider,app_id);}
+void steam_ui_status(struct steam_status_view *view)
+{
+    if (provider) steam_provider_status(provider, view);
+    else *view = (struct steam_status_view){.state = STEAM_OFFLINE};
+}
+unsigned int steam_ui_library_generation(void)
+{
+    struct steam_library_view library = {0};
+    if (provider) steam_provider_library_status(provider, &library);
+    return library.generation;
+}
 int steam_ui_online(void)
 {
     struct steam_status_view v;
-    if(!provider)return 0;
-    steam_provider_status(provider,&v);return v.state==STEAM_ONLINE;
+    steam_ui_status(&v);return v.state==STEAM_ONLINE;
 }
 size_t steam_ui_owned(const char *root,struct steam_game *games,size_t capacity)
 {
-    struct steam_library_view l;size_t total=0;
+    size_t total=0;
     steam_ui_prepare(root);if(!provider)return 0;
-    steam_provider_library_status(provider,&l);
-    if(l.state!=STEAM_LIBRARY_READY)return 0;
     return steam_provider_library_page(provider,"",0,games,capacity,&total);
 }
 void steam_ui_game(struct ui *ui,const char *root,const struct steam_game *game,struct steam_artwork *art)

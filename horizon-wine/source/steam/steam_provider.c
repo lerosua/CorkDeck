@@ -4,6 +4,9 @@
 #include "steam_cm.h"
 #include "steam_crypto.h"
 #include "steam_family.h"
+#include "steam_library_cache.h"
+#include <dirent.h>
+#include <curl/curl.h>
 #include "steam_session.h"
 #include "steam_settings.h"
 #include "steam_storage.h"
@@ -15,6 +18,8 @@
 struct steam_provider {
     SDL_Thread *thread; SDL_mutex *mutex; SDL_atomic_t cancel;
     struct steam_status_view view;
+    Uint32 last_link_check; /* session worker only */
+    int link_down;
     char account[128],password[256],guard[17];
     char challenge[512];int qr;
     struct steam_library library;struct steam_library_view library_view;int refresh_library;
@@ -33,15 +38,49 @@ struct steam_provider {
 /* Authentication rejection and protocol errors are never transport retries. */
 static int retry_transport(unsigned int error,unsigned int transport)
 {
-    if(error>=1000)return 0;
-    return (!error||error==2||error==6||error>=100)&&
-        (transport==2||transport==6||(!transport&&error>=100));
+    if (!error) return transport == 2 || transport == 6; /* active CM: I/O or timeout */
+    if (error == 2 || error == 6 || error == 100 + STEAM_NETWORK) return 1;
+    /* A TLS handshake can be interrupted. Verification failures are terminal. */
+    if (error == 100 + STEAM_TLS) return transport == CURLE_SSL_CONNECT_ERROR;
+    switch (error) {
+    case 200 + CURLE_COULDNT_RESOLVE_HOST:
+    case 200 + CURLE_COULDNT_CONNECT:
+    case 200 + CURLE_OPERATION_TIMEDOUT:
+    case 200 + CURLE_SSL_CONNECT_ERROR:
+    case 200 + CURLE_SEND_ERROR:
+    case 200 + CURLE_RECV_ERROR:
+    case 200 + CURLE_GOT_NOTHING:
+        return 1;
+    default: return 0;
+    }
 }
+static void wake_ui(void)
+{
+    SDL_Event event = {.type = SDL_USEREVENT};
+    SDL_PushEvent(&event);
+}
+
 static void state(struct steam_provider *p,enum steam_status status,unsigned int error,unsigned int guard,uint64_t id)
 {
-    SDL_LockMutex(p->mutex);p->view=(struct steam_status_view){.state=status,.error=error,.guard_type=guard,.steam_id=id};SDL_UnlockMutex(p->mutex);
+    SDL_LockMutex(p->mutex);
+    int changed = p->view.state != status;
+    p->view = (struct steam_status_view){.state=status,.error=error,.guard_type=guard,.steam_id=id,.restoring=!!p->restore};
+    SDL_UnlockMutex(p->mutex);
+    if (changed) wake_ui();
 }
 static int cancelled(void *opaque) {return SDL_AtomicGet(&((struct steam_provider *)opaque)->cancel);}
+/* Shared by directory requests and CM I/O, including idle heartbeat ticks. */
+static int connection_interrupted(void *opaque)
+{
+    struct steam_provider *p = opaque;
+    if (cancelled(p)) return 1;
+    Uint32 now = SDL_GetTicks();
+    if (!p->link_down && now - p->last_link_check >= 1000) {
+        p->last_link_check = now;
+        p->link_down = steam_link_connected() == 0;
+    }
+    return p->link_down;
+}
 static int wait_poll(struct steam_provider *p,struct steam_cm *cm,unsigned int ms)
 {
     Uint32 started=SDL_GetTicks();
@@ -83,6 +122,26 @@ static void finish_discard(struct steam_provider *p)
     v.diagnostic_error=steam_download_diagnostic(p->root,&v);
     download_progress(p,&v);
 }
+/* Retry unreachable Steam even on an associated Wi-Fi network. A physical
+ * down-to-up transition bypasses the current backoff. Unknown link state
+ * falls back to the timer. Logout/shutdown interrupts either wait. */
+static int wait_for_network(struct steam_provider *p, Uint32 delay)
+{
+    Uint32 started = SDL_GetTicks(), checked = started;
+    int link = steam_link_connected();
+    int saw_down = p->link_down || link == 0;
+    while (!cancelled(p)) {
+        if (link != 0 && ((saw_down && link == 1) || SDL_GetTicks() - started >= delay)) return 1;
+        if (SDL_AtomicGet(&p->download_cancel)) finish_discard(p);
+        SDL_Delay(100);
+        if (SDL_GetTicks() - checked >= 500) {
+            checked = SDL_GetTicks();
+            link = steam_link_connected();
+            if (link == 0) saw_down = 1;
+        }
+    }
+    return 0;
+}
 static int discard_worker(void *opaque)
 {finish_discard(opaque);return 0;}
 static int rsa_key(const struct steam_cm_message *m,char *mod,char *exp,uint64_t *stamp)
@@ -123,13 +182,58 @@ static int logon(struct steam_cm *cm,struct steam_auth *auth,uint32_t *session,u
     if(!m.session_id){*error=13;return 0;}
     *error=0;*session=m.session_id;*cell=zone;*heartbeat=hb?hb:30;return 1;
 }
+static int local_install_state(const char *root, uint32_t app)
+{
+    char directory[512];
+    if (steam_install_present(root, app)) return 1;
+    return steam_storage_pending(root, app, directory) ? 2 : 0;
+}
+
+/* A cache hit should cost SD reads proportional to the installations, even for
+ * an account with thousands of uninstalled games. Include legacy numeric dirs. */
+static void restore_install_states(struct steam_provider *p, struct steam_library *list)
+{
+    const char *dirs[] = {"steam/installed", "drive_c/Steam", "steam/trash"};
+    for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", p->root, dirs[i]);
+        DIR *dir = opendir(path);
+        if (!dir) continue;
+        struct dirent *entry;
+        while (!cancelled(p) && (entry = readdir(dir))) {
+            char *end;
+            if (entry->d_name[0] < '1' || entry->d_name[0] > '9') continue;
+            unsigned long id = strtoul(entry->d_name, &end, 10);
+            if (id > INT32_MAX || strcmp(end, i == 0 ? ".path" : "")) continue;
+            for (size_t j = 0; j < list->count; j++) {
+                if (list->games[j].app_id == id) {
+                    list->games[j].installed = local_install_state(p->root, (uint32_t)id);
+                    break;
+                }
+            }
+        }
+        closedir(dir);
+    }
+}
+
+static void publish_library(struct steam_provider *p, struct steam_library *list)
+{
+    /* Caller holds the provider mutex. */
+    steam_library_clear(&p->library);
+    p->library = *list;
+    *list = (struct steam_library){0};
+    p->library_view.count = p->library.count;
+    p->library_view.generation++;
+}
+
 static int run(void *opaque)
 {
     struct steam_provider *p=opaque;struct steam_auth *auth=calloc(1,sizeof(*auth));struct steam_cm *cm=NULL;
     unsigned char body[256],packet[4096];struct steam_wire_writer w={body,sizeof(body),0,0};
     struct steam_cm_message m;char mod[1025]={0},exp[9]={0},encrypted[1024]={0},code[17]={0};
     uint64_t stamp=0,job=1;size_t written=0;unsigned int error=0,guard_error=0,guard_type=0,hb=30,retries=0;uint32_t session=0,cell=0;Uint32 start,last;
-    network_diag_snapshot( "steam.link" );
+    struct steam_library_stamp cached = {0};
+    unsigned int transport;
     if(!auth){error=5;goto done;}
     if(p->restore){
         state(p,STEAM_AUTHENTICATING,0,0,0);
@@ -137,10 +241,27 @@ static int run(void *opaque)
         steam_secret_clear(p->vault_pass,sizeof(p->vault_pass));
         network_diag("stage=steam.session.load automatic=%d error=%u",p->restore==2,error);
         if(error)goto done;
+        struct steam_library list = {0};
+        int loaded = steam_library_cache_load(p->root, auth->steam_id, &list, &cached);
+        network_diag("stage=steam.library.cache.load hit=%d games=%zu", loaded, list.count);
+        if (loaded) {
+            restore_install_states(p, &list);
+            SDL_LockMutex(p->mutex);
+            publish_library(p, &list);
+            p->library_view.state = STEAM_LIBRARY_READY;
+            SDL_UnlockMutex(p->mutex);
+            wake_ui();
+        }
     }
+    network_diag_snapshot( "steam.link" );
 connect:
     error=0;session=0;cell=0;job=1;
-    state(p,STEAM_CONNECTING,0,0,0);cm=steam_cm_connect(cancelled,p,&error);if(!cm)goto done;
+    p->last_link_check = SDL_GetTicks() - 1000;
+    p->link_down = 0;
+    if (connection_interrupted(p)) {error = 100 + STEAM_NETWORK; goto done;}
+    state(p,STEAM_CONNECTING,0,0,0);
+    if (retries) network_diag("stage=steam.reconnect result=attempt attempt=%u", retries);
+    cm=steam_cm_connect(p->root,connection_interrupted,p,&error);if(!cm)goto done;
     if(auth->state==STEAM_AUTH_TOKENS)goto authenticated;
     state(p,STEAM_AUTHENTICATING,0,0,0);
     if(p->qr){
@@ -190,11 +311,16 @@ connect:
 authenticated:
     state(p,STEAM_LOGGING_ON,0,0,0);
     if(!logon(cm,auth,&session,&cell,&hb,&error))goto done;
+    network_diag("stage=steam.session.online restored=%d reconnect_attempt=%u", !!p->restore, retries);
+    if (retries) network_diag("stage=steam.reconnect result=online attempt=%u", retries);
+    retries = 0;
     state(p,STEAM_ONLINE,0,0,auth->steam_id);
+    steam_cm_remember(p->root,steam_cm_endpoint(cm));
     steam_secret_clear(auth->access_token,sizeof(auth->access_token));
     p->active_cm=cm;p->active_id=auth->steam_id;p->active_session=session;p->heartbeat=hb;p->last_heartbeat=SDL_GetTicks();
-    SDL_LockMutex(p->mutex);p->library_view.state=STEAM_LIBRARY_IDLE;SDL_UnlockMutex(p->mutex);
-    steam_provider_refresh_library(p);
+    char language[32];
+    steam_provider_language(p, language);
+    if (!steam_library_fresh(&cached, language, time(NULL))) steam_provider_refresh_library(p);
     last=SDL_GetTicks();
     while(!cancelled(p)) {
       finish_discard(p);
@@ -245,25 +371,30 @@ authenticated:
             if(!lib_error){family_backend.job=job;family_error=steam_family_refresh(&family_backend,&replacement);job=family_backend.job;}
             if(!lib_error&&p->root[0]){size_t i;
               for (i = 0; i < replacement.count; ++i) {
-                char directory[512];
-                replacement.games[i].installed =
-                    steam_install_present(p->root, replacement.games[i].app_id)
-                        ? 1
-                    : steam_storage_pending(
-                          p->root, replacement.games[i].app_id, directory)
-                        ? 2
-                        : 0;
+                replacement.games[i].installed = local_install_state(p->root, replacement.games[i].app_id);
                 if (i % 32 == 0 && !connection_tick(p)) {
                   lib_error = 2000 + steam_cm_error(cm);
                   break;
                 }
               }
             }
+            /* An incomplete family response can seed an empty cache, but must
+             * never displace the last complete snapshot. Retry it at next login. */
+            if (!lib_error && (!family_error || !cached.synced)) {
+                time_t now = time(NULL);
+                cached.synced = !family_error && now > 0 ? (uint64_t)now : 0;
+                strcpy(cached.language, family_backend.language);
+                int saved = steam_library_cache_save(p->root, &replacement, &cached);
+                network_diag("stage=steam.library.cache.save ok=%d games=%zu family_error=%u", saved, replacement.count, family_error);
+                SDL_LockMutex(p->mutex);
+                publish_library(p, &replacement);
+                SDL_UnlockMutex(p->mutex);
+            }
+            steam_library_clear(&replacement);
             SDL_LockMutex(p->mutex);
-            if(!lib_error){steam_library_clear(&p->library);p->library=replacement;p->library_view.count=p->library.count;p->library_view.generation++;}
-            else steam_library_clear(&replacement);
             p->library_view.error=lib_error;p->library_view.family_error=family_error;p->library_view.state=lib_error?STEAM_LIBRARY_FAILED:STEAM_LIBRARY_READY;
             SDL_UnlockMutex(p->mutex);
+            wake_ui();
         }
         if (inspect_app) {
           struct steam_app app;
@@ -395,26 +526,37 @@ authenticated:
         SDL_Delay(50);
     }
 done:
-    /* Only transport loss retries token logon. Server rejection/protocol faults
-     * stop immediately. No password/Guard replay, no automatic install replay. */
-    if(!cancelled(p)&&auth&&auth->state==STEAM_AUTH_TOKENS&&retries<3&&
-       retry_transport(error,cm?steam_cm_error(cm):0)) {
-        Uint32 delay=2000u<<retries++, waiting=SDL_GetTicks();
-        state(p,STEAM_CONNECTING,0,0,0);
-        p->active_cm=NULL;steam_cm_close(cm);cm=NULL;
-        while(!cancelled(p)&&SDL_GetTicks()-waiting<delay)SDL_Delay(50);
-        if(!cancelled(p))goto connect;
+    transport = cm ? steam_cm_error(cm) : p->link_down ? 0 : steam_cm_connect_transport();
+    if (p->link_down && (!error || error == 1 || error == 100 + STEAM_CANCELLED))
+        error = 100 + STEAM_NETWORK;
+    if (!cancelled(p) && auth && auth->state == STEAM_AUTH_TOKENS &&
+        retry_transport(error, transport)) {
+        Uint32 delay = retries < 4 ? (2000u << retries) : 30000u;
+        if (retries) network_diag("stage=steam.reconnect result=failed attempt=%u error=%u transport=%u",
+                                 retries, error, transport);
+        if (retries < UINT32_MAX) retries++;
+        network_diag("stage=steam.reconnect result=waiting next_attempt=%u error=%u transport=%u link_down=%d backoff_ms=%u",
+                     retries, error, transport, p->link_down, (unsigned)delay);
+        state(p, STEAM_WAIT_NETWORK, error ? error : transport, 0, 0);
+        p->active_cm = NULL;
+        steam_cm_close(cm);
+        cm = NULL;
+        if (wait_for_network(p, delay)) goto connect;
     }
+    if (retries) network_diag("stage=steam.reconnect result=%s attempt=%u error=%u transport=%u",
+                             cancelled(p) ? "cancelled" : "stopped", retries, error,
+                             transport);
     SDL_LockMutex(p->mutex);steam_secret_clear(p->challenge,sizeof(p->challenge));SDL_UnlockMutex(p->mutex);
     if(!error && cm)error=steam_cm_error(cm);
     if(cancelled(p))state(p,STEAM_OFFLINE,0,0,0);
     else {
         SDL_LockMutex(p->mutex);
         p->view.failed_stage=(unsigned int)p->view.state;p->view.cm_type=cm?steam_cm_last_type(cm):0;
-        p->view.transport_error=cm?steam_cm_error(cm):steam_cm_connect_transport();
+        p->view.transport_error=transport;
         p->view.state=STEAM_ERROR;p->view.error=error?error:3;p->view.steam_id=0;
         struct steam_status_view failed=p->view;
         SDL_UnlockMutex(p->mutex);
+        wake_ui();
         network_diag( "stage=steam.auth.failed state=%u error=%u cm_type=%u transport=%u",
                       failed.failed_stage, failed.error, failed.cm_type, failed.transport_error );
     }
@@ -442,7 +584,11 @@ static void disconnect(struct steam_provider *p)
     finish_discard(p);
     steam_secret_clear(p->password,sizeof(p->password));steam_secret_clear(p->guard,sizeof(p->guard));
     steam_secret_clear(p->vault_pass,sizeof(p->vault_pass));p->save_session=0;p->restore=0;
-    SDL_LockMutex(p->mutex);steam_library_clear(&p->library);memset(&p->library_view,0,sizeof(p->library_view));p->refresh_library=0;SDL_UnlockMutex(p->mutex);
+    SDL_LockMutex(p->mutex);
+    steam_library_clear(&p->library);
+    p->library_view = (struct steam_library_view){.generation = p->library_view.generation + 1};
+    p->refresh_library = 0;
+    SDL_UnlockMutex(p->mutex);
     SDL_LockMutex(p->mutex);
     p->install_app = p->auto_app = 0;
     p->fail_app = p->restart_app = 0;
@@ -461,6 +607,7 @@ void steam_provider_logout(struct steam_provider *p)
 {
     if(!p)return;
     disconnect(p);
+    steam_library_cache_forget(p->root);
     p->vault.error=p->root[0]?steam_session_forget(p->root):0;
     p->vault.present=p->root[0]?steam_session_present(p->root):0;
     p->vault.saving=0;p->vault.automatic=0;
@@ -578,7 +725,7 @@ void steam_provider_cancel_download(struct steam_provider *p)
         SDL_AtomicSet(&p->download_cancel,1);
         p->auto_app=0;p->fail_app=0;p->fail_count=0;p->download.stuck=0;
         if(!steam_download_active(p->download.state))p->download.state=STEAM_DOWNLOAD_CLEANING;
-        offline=p->view.state!=STEAM_ONLINE;
+        offline=p->view.state==STEAM_OFFLINE || p->view.state==STEAM_ERROR;
     }
     SDL_UnlockMutex(p->mutex);
     if(offline){
