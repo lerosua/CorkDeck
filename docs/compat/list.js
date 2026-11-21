@@ -1,7 +1,6 @@
 'use strict';
 const byId = id => document.getElementById(id);
 const make = (tag, text) => Object.assign(document.createElement(tag), {textContent: text});
-const form = new URL(byId('report').href);
 let reports = [];
 function render() {
   const term = byId('query').value.trim().toLowerCase();
@@ -20,12 +19,7 @@ function render() {
     const entry = make('article', '');
     entry.className = 'entry';
     const head = make('header', '');
-    const link = make('a', '补充实测');
-    const url = new URL(form);
-    url.searchParams.set('appid', id);
-    url.searchParams.set('game', rows[0][1]);
-    link.href = url.href;
-    head.append(make('h2', rows[0][1]), link);
+    head.append(make('h2', rows[0][1]));
     entry.append(head, make('small', 'Steam AppID ' + id));
     const list = make('ul', '');
     for (const [, ,version, result, detail, setup, source] of rows) {

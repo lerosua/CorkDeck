@@ -63,7 +63,7 @@ Mac 端使用 Homebrew 的 Bison 生成 Wine 所需文件，Switch 原生程序�
 
 ## 游戏兼容性实测
 
-按 Steam AppID 或游戏名查询历史实测，也可以在已安装或未安装游戏的详情页查看。按 R 显示上报二维码，用手机填写测试阶段和运行设置。审核收录后，网页和主机从同一份表格更新。主机首次断网可查内置记录，联网刷新后会将完整列表保存在 `sdmc:/switch/wine/compat-reports.tsv`。按 + 可主动刷新；暂无实测时显示硬件预估。[查询实测表](docs/compat/reports.tsv) · [中文上报表单](https://github.com/lerosua/CorkDeck/issues/new?template=compatibility.yml)
+按 Steam AppID 或游戏名查询历史实测，也可以在已安装或未安装游戏的详情页查看。网页和主机从同一份表格更新。主机首次断网可查内置记录，联网刷新后会将完整列表保存在 `sdmc:/switch/wine/compat-reports.tsv`。按 + 可主动刷新；暂无实测时显示硬件预估。[查询实测表](docs/compat/reports.tsv)
 
 ## 日志与问题反馈
 

@@ -1,7 +1,5 @@
 #include "steam_library_ui.h"
 #include "../launcher_ui.h"
-#include "../app/app_version.h"
-#include "../../vendor/qrcodegen/qrcodegen.h"
 #include "steam_content.h"
 #include "steam_compat.h"
 #include "steam_provider.h"
@@ -219,35 +217,6 @@ static int draw_compatibility(struct ui *ui, uint32_t app, int y, int show_specs
     }
     return y;
 }
-static void report_compatibility(struct ui *ui, const struct steam_game *game)
-{
-    char url[256];
-    uint8_t code[qrcodegen_BUFFER_LEN_FOR_VERSION(10)], scratch[sizeof(code)];
-    snprintf(url, sizeof(url), "https://github.com/lerosua/CorkDeck/issues/new?template=compatibility.yml&appid=%u&version=%s",
-             game->app_id, CORKDECK_VERSION);
-    if (!qrcodegen_encodeText(url, scratch, code, qrcodegen_Ecc_MEDIUM, 1, 10, qrcodegen_Mask_AUTO, true))
-        return;
-    const int modules = qrcodegen_getSize(code), scale = 300 / (modules + 8);
-    const int side = (modules + 8) * scale, x = (1280 - side) / 2;
-    ui_start_screen(ui);
-    while (ui_begin_frame(ui)) {
-        struct ui_input input;
-        while (ui_poll(ui, &input))
-            if (input.button == UI_B || (input.touch == UI_TOUCH_TAP && input.y < 80)) return;
-        ui_background(ui);
-        ui_header_back(ui, "Report compatibility", game->name);
-        ui_fill(ui, x, 176, side, side, (SDL_Color){255,255,255,255});
-        for (int j = 0; j < modules; ++j)
-            for (int i = 0; i < modules; ++i)
-                if (qrcodegen_getModule(code, i, j))
-                    ui_fill(ui, x + (4+i)*scale, 176 + (4+j)*scale, scale, scale, (SDL_Color){0,0,0,255});
-        ui_text_centered(ui, ui->normal, 640, 510, "Scan to report this game on GitHub", ui->value);
-        const struct ui_hint hint = {UI_B, "Back"};
-        ui_footer(ui, &hint, 1);
-        ui_present(ui);
-        ui_wait(ui);
-    }
-}
 int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
                          const char *root, const struct steam_game *g,
                          const struct steam_launcher_adapter *adapter,struct steam_artwork *art) {
@@ -270,11 +239,6 @@ int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
       if (input.touch == UI_TOUCH_TAP && SDL_PointInRect(&touch, &action)) input.button = UI_A;
       if (input.button == UI_B || (input.touch == UI_TOUCH_TAP && input.y < 80))
         goto done;
-      if (input.button == UI_R) {
-        report_compatibility(ui, g);
-        ui_start_screen(ui);
-        break;
-      }
       if (input.button == UI_X && g->installed == 1) {
         struct steam_download_view download;
         steam_provider_download_status(p,&download);
@@ -414,13 +378,13 @@ int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
     if (g->installed) {
       const struct ui_hint h[] = {{UI_A, "Add / Choose executable"},
                                   {UI_Y, "Delete game"},
-                                  {UI_X, "Dependencies"}, {UI_R, "Report compatibility"},
+                                  {UI_X, "Dependencies"},
                                   {UI_B, "Back"}};
-      ui_footer(ui, h, 5);
+      ui_footer(ui, h, sizeof(h)/sizeof(h[0]));
     } else {
       const struct ui_hint h[] = {
-          {UI_A, "Install"}, {UI_PLUS, "Retry metadata"}, {UI_R, "Report compatibility"}, {UI_B, "Back"}};
-      ui_footer(ui, h, 4);
+          {UI_A, "Install"}, {UI_PLUS, "Retry metadata"}, {UI_B, "Back"}};
+      ui_footer(ui, h, sizeof(h)/sizeof(h[0]));
     }
     ui_present(ui);
     ui_wait(ui);

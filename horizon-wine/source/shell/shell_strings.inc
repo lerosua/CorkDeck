@@ -707,8 +707,6 @@ static const char *const shell_strings[][APP_LANG_COUNT] =
     { "Game language", "Язык игры", "游戏语言" },
     { "English (no files in %s) / %s", "Английский (нет файлов для %s) / %s", "英语（没有 %s 语言文件） / %s" },
     { "%s (choose alternative) / %s", "%s (выберите другой язык) / %s", "%s（请选择其他语言） / %s" },
-    { "Report compatibility", NULL, "上报实测" },
-    { "Scan to report this game on GitHub", NULL, "用手机扫码，在 GitHub 填写这款游戏的实测结果" },
     { "Windows minimum", NULL, "Windows 最低配置" },
     { "Not specified", NULL, "未列出" },
     { "Reading Steam store...", NULL, "正在读取 Steam 商店资料…" },
