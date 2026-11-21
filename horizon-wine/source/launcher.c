@@ -27,6 +27,7 @@
 #endif
 
 #include "launcher.h"
+#include "system_network.h"
 #ifdef WINE_NX_HAS_EMBEDDED_LOGO
 #include "forwarder.h"
 #endif
@@ -176,7 +177,9 @@ struct launcher
     float label_open[SHELL_TABS];
     /* Where the last frame drew what a tap can hit. */
     SDL_Rect shell_hits[SHELL_TABS];
-    /* The header's clock and battery, read once a second. */
+    /* Both header layouts share one system snapshot per second. */
+    struct nx_network network;
+    int status_sampled;
     Uint32 status_read;
     int status, clock_hour, clock_minute, battery, charging;
 
@@ -1072,19 +1075,80 @@ static int shell_width( struct launcher *l, int tab )
     return width;
 }
 
-/* The clock and the battery, at the right of whichever header asks for them.
- * Returns where the left of what it drew is. */
+static void read_system_status( struct launcher *l )
+{
+    Uint32 now = SDL_GetTicks();
+    if (l->status_sampled && now - l->status_read < 1000) return;
+    l->status = launcher_platform_status( &l->clock_hour, &l->clock_minute, &l->battery, &l->charging );
+    l->network = nx_system_network();
+    l->status_read = now;
+    l->status_sampled = 1;
+}
+
+/* Three two-pixel arcs at the launcher's 1280x720 logical resolution. */
+static void draw_wifi( struct ui *ui, int x, int cy, unsigned int bars, int offline )
+{
+    static const SDL_Point arcs[3][5] = {
+        {{-4, 3}, {-2, 2}, {0, 2}, {2, 2}, {4, 3}},
+        {{-8, 0}, {-4,-2}, {0,-3}, {4,-2}, {8, 0}},
+        {{-12,-4}, {-6,-7}, {0,-8}, {6,-7}, {12,-4}}
+    };
+    SDL_Color dim = {96, 107, 118, 255};
+    for (unsigned int i = 0; i < 3; ++i)
+    {
+        SDL_Color c = i < bars ? ui->value : dim;
+        SDL_Point points[5];
+        SDL_SetRenderDrawColor( ui->renderer, c.r, c.g, c.b, c.a );
+        for (int j = 0; j < 5; ++j)
+            points[j] = (SDL_Point){ x + arcs[i][j].x, cy + arcs[i][j].y };
+        SDL_RenderDrawLines( ui->renderer, points, 5 );
+        for (int j = 0; j < 5; ++j) points[j].y++;
+        SDL_RenderDrawLines( ui->renderer, points, 5 );
+    }
+    ui_fill_circle( ui, x, cy + 7, 2, offline ? dim : ui->value );
+    if (offline)
+    {
+        SDL_Color c = ui->value;
+        SDL_SetRenderDrawColor( ui->renderer, c.r, c.g, c.b, c.a );
+        SDL_RenderDrawLine( ui->renderer, x - 10, cy - 9, x + 9, cy + 10 );
+        SDL_RenderDrawLine( ui->renderer, x - 9, cy - 9, x + 10, cy + 10 );
+    }
+}
+
+static int draw_network_status( struct ui *ui, struct nx_network net, int right, int cy )
+{
+    int x = right - 13;
+    ui->status_visible = 1;
+    switch (net.link)
+    {
+    case NX_LINK_WIFI:
+    case NX_LINK_DOWN:
+        draw_wifi( ui, x, cy, net.bars, net.link == NX_LINK_DOWN );
+        break;
+    case NX_LINK_ETHERNET:
+        ui_border( ui, x - 10, cy - 8, 20, 13, 2, ui->value );
+        for (int i = 0; i < 4; i++) ui_fill( ui, x - 7 + 4 * i, cy - 6, 2, 4, ui->value );
+        ui_fill( ui, x - 4, cy + 5, 8, 3, ui->value );
+        break;
+    case NX_LINK_CONNECTING:
+        for (int i = -1; i <= 1; i++) ui_fill_circle( ui, x + 7 * i, cy, 2, ui->dim );
+        break;
+    case NX_LINK_OTHER:
+        ui_fill_circle( ui, x, cy, 3, ui->value );
+        break;
+    case NX_LINK_UNKNOWN:
+        ui_fill( ui, x - 5, cy, 10, 2, ui->dim );
+        break;
+    }
+    return right - 26;
+}
+
 static int draw_status( struct launcher *l, int right, int cy )
 {
     struct ui *ui = &l->ui;
-    Uint32 now = SDL_GetTicks();
     char text[32];
 
-    if (!l->status_read || now - l->status_read >= 1000)
-    {
-        l->status = launcher_platform_status( &l->clock_hour, &l->clock_minute, &l->battery, &l->charging );
-        l->status_read = now ? now : 1;
-    }
+    read_system_status( l );
     if (l->status & LAUNCHER_STATUS_BATTERY)
     {
         snprintf( text, sizeof(text), "%d%%", l->battery );
@@ -1092,12 +1156,13 @@ static int draw_status( struct launcher *l, int right, int cy )
         ui_text( ui, ui->small, right, cy - TTF_FontHeight( ui->small ) / 2, text, ui->value );
         right -= 8 + 29;
         draw_battery( ui, right, cy, l->battery, l->charging );
-        right -= 24;
+        right -= 14;
     }
+    right = draw_network_status( ui, l->network, right, cy );
     if (l->status & LAUNCHER_STATUS_CLOCK)
     {
         snprintf( text, sizeof(text), "%02d:%02d", l->clock_hour, l->clock_minute );
-        right -= ui_text_width( ui, ui->small, text );
+        right -= 14 + ui_text_width( ui, ui->small, text );
         ui_text( ui, ui->small, right, cy - TTF_FontHeight( ui->small ) / 2, text, ui->value );
     }
     return right;

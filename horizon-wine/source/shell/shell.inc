@@ -68,8 +68,6 @@ static struct shell
     /* Asked once a frame or once a second, not once for every card drawn. */
     struct steam_download_view transfer;
     int transfer_active, transfer_known;
-    Uint32 status_read;
-    int status, hour, minute, battery, charging;
     unsigned int app_id[LAUNCHER_MAX_ENTRIES];
     /* Covers and wide pictures of Steam games, fetched on a thread of their own. */
     struct steam_artwork *library_art;
@@ -296,18 +294,6 @@ static int sh_download( struct steam_download_view *view )
     }
     *view = sh.transfer;
     return sh.transfer_active;
-}
-
-/* The clock and the battery, read once a second. */
-static int sh_status( int *hour, int *minute, int *battery, int *charging )
-{
-    if (!sh.status_read || SDL_GetTicks() - sh.status_read >= 1000)
-    {
-        sh.status = launcher_platform_status( &sh.hour, &sh.minute, &sh.battery, &sh.charging );
-        sh.status_read = SDL_GetTicks() | 1;
-    }
-    *hour = sh.hour; *minute = sh.minute; *battery = sh.battery; *charging = sh.charging;
-    return sh.status;
 }
 
 static const char *sh_owned_name( uint32_t app_id )
@@ -545,7 +531,7 @@ static void sh_top( struct launcher *l, const char *crumb, const char *detail )
     struct ui *ui = &l->ui;
     struct steam_download_view d;
     char text[160];
-    int x = SH_MARGIN, right = ui->width - SH_MARGIN, cy = 40, hour, minute, battery, charging, status;
+    int x = SH_MARGIN, right = ui->width - SH_MARGIN, cy = 40;
 
     /* The mark: a cork, and the name. */
     ui_rounded( ui, x, cy - 13, 18, 24, 5, SH_CORK );
@@ -559,21 +545,22 @@ static void sh_top( struct launcher *l, const char *crumb, const char *detail )
     }
     if (detail) sh_fit( ui, ui->small, x, cy - TTF_FontHeight( ui->small ) / 2, 420, detail, ui->dim, 0 );
 
-    status = sh_status( &hour, &minute, &battery, &charging );
-    if (status & LAUNCHER_STATUS_CLOCK)
+    read_system_status( l );
+    if (l->status & LAUNCHER_STATUS_CLOCK)
     {
-        snprintf( text, sizeof(text), "%02d:%02d", hour, minute );
+        snprintf( text, sizeof(text), "%02d:%02d", l->clock_hour, l->clock_minute );
         ui_text_right( ui, ui->small, right, cy - TTF_FontHeight( ui->small ) / 2, text, ui->dim );
         right -= ui_text_width( ui, ui->small, text ) + 18;
     }
-    if (status & LAUNCHER_STATUS_BATTERY)
+    if (l->status & LAUNCHER_STATUS_BATTERY)
     {
-        snprintf( text, sizeof(text), "%d%%", battery );
+        snprintf( text, sizeof(text), "%d%%", l->battery );
         ui_text_right( ui, ui->small, right, cy - TTF_FontHeight( ui->small ) / 2, text, ui->dim );
         right -= ui_text_width( ui, ui->small, text ) + 8;
-        draw_battery( ui, right - 30, cy, battery, charging );
+        draw_battery( ui, right - 30, cy, l->battery, l->charging );
         right -= 48;
     }
+    right = draw_network_status( ui, l->network, right, cy ) - 18;
     if (sh_download( &d ) && d.total)
     {
         int percent = (int)(d.downloaded * 100 / d.total), w = 90;
@@ -3014,7 +3001,7 @@ static void sh_quick_panel( struct launcher *l )
         float open = ui->animations ? (SDL_GetTicks() - opened) / 160.0f : 1;
         struct steam_download_view d;
         char text[200];
-        int w = 400, x, y, i, hour, minute, battery, charging, status, active;
+        int w = 400, x, y, i, active;
 
         while (ui_poll( ui, &input ))
         {
@@ -3063,7 +3050,7 @@ static void sh_quick_panel( struct launcher *l )
         ui_text( ui, ui->small, x + 26, y, "STATE", ui->dim );
         y += TTF_FontHeight( ui->small ) + 8;
         ui_rounded( ui, x + 20, y, w - 40, 4 * (TTF_FontHeight( ui->small ) + 8) + 16, 10, SH_PANEL );
-        status = sh_status( &hour, &minute, &battery, &charging );
+        read_system_status( l );
         for (i = 0; i < 4; i++)
         {
             const char *label = i == 0 ? "Battery" : i == 1 ? "Steam" : i == 2 ? "Free on the card" : "Windows components";
@@ -3071,7 +3058,7 @@ static void sh_quick_panel( struct launcher *l )
 
             if (i == 0)
             {
-                if (status & LAUNCHER_STATUS_BATTERY) snprintf( text, sizeof(text), "%d%%%s", battery, charging ? " +" : "" );
+                if (l->status & LAUNCHER_STATUS_BATTERY) snprintf( text, sizeof(text), "%d%%%s", l->battery, l->charging ? " +" : "" );
                 else snprintf( text, sizeof(text), "%s", sh_tr( "no data" ) );
             }
             else if (i == 1)

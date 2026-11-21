@@ -5,6 +5,44 @@
 #undef main
 #include "../source/launcher.c"
 
+static Uint32 wake_idle_test(Uint32 interval, void *unused)
+{
+    SDL_Event event = {.type = SDL_USEREVENT};
+    (void)interval;
+    (void)unused;
+    SDL_PushEvent(&event);
+    return 0;
+}
+
+static void network_indicator(struct ui *ui)
+{
+    const struct nx_network states[] = {
+        {NX_LINK_WIFI, 0}, {NX_LINK_WIFI, 1}, {NX_LINK_WIFI, 2}, {NX_LINK_WIFI, 3},
+        {NX_LINK_DOWN, 0}, {NX_LINK_ETHERNET, 0}, {NX_LINK_CONNECTING, 0}
+    };
+    SDL_Rect area = {0, 0, 32, 26};
+    Uint32 images[SDL_arraysize(states)][32 * 26];
+    int animations = ui->animations;
+    ui->animations = 0;
+    assert(ui_begin_frame(ui));
+    for (size_t i = 0; i < SDL_arraysize(states); ++i) {
+        ui_fill(ui, 0, 0, area.w, area.h, (SDL_Color){0, 0, 0, 255});
+        draw_network_status(ui, states[i], 30, 13);
+        assert(!SDL_RenderReadPixels(ui->renderer, &area, SDL_PIXELFORMAT_RGBA32, images[i], 32 * 4));
+        for (size_t j = 0; j < i; ++j)
+            assert(memcmp(images[j], images[i], sizeof(images[i])));
+    }
+    SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
+    SDL_TimerID watchdog = SDL_AddTimer(4000, wake_idle_test, NULL);
+    assert(watchdog);
+    Uint32 start = SDL_GetTicks();
+    ui_wait(ui);
+    assert(SDL_GetTicks() - start >= 1000 && SDL_RemoveTimer(watchdog));
+    assert(ui->running && !ui->queued_count);
+    ui->animations = animations;
+    puts("Wi-Fi strengths, offline, Ethernet and connecting render distinctly; idle status refresh wakes without input");
+}
+
 /* Exercise the same card branch used by the 7x2 Not installed grid. Keep the
  * network paused so that a successful render must have come from the card. */
 static void cached_library_grid(struct launcher *l)
@@ -17,6 +55,7 @@ static void cached_library_grid(struct launcher *l)
     png_image png = {.version=PNG_IMAGE_VERSION, .width=1, .height=1, .format=PNG_FORMAT_RGBA};
 
     assert(ui_init(&l->ui, corkdeck_font, corkdeck_font_size, 0));
+    network_indicator(&l->ui);
     assert(sh_library_art(l));
     steam_artwork_pause(sh.library_art, 1);
     for (int i = 0; i < count; i++) {

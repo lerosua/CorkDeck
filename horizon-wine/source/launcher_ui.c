@@ -1122,6 +1122,7 @@ int ui_begin_frame( struct ui *ui )
         ui->trigger_left = ui->trigger_right = 0;
     }
     ui->scrolling_text = 0;
+    ui->status_visible = 0;
     repeat_held( ui );
     if (ui->screen) SDL_SetRenderTarget( ui->renderer, ui->screen );
     return 1;
@@ -1333,7 +1334,7 @@ static int needs_animation( struct ui *ui )
 }
 
 /* Wait for the next frame: about 60 per second while something moves, else
- * until an event, checking every 250 ms whether the system wants the launcher closed. */
+ * until input or the next one-second system status refresh. */
 void ui_wait( struct ui *ui )
 {
     SDL_Event event;
@@ -1355,6 +1356,7 @@ void ui_wait( struct ui *ui )
                 ui->running = 0;
                 return;
             }
+            if (ui->status_visible && SDL_GetTicks() - now >= 1000) return;
         }
     }
     if (!ui->deadline || SDL_TICKS_PASSED( now, ui->deadline + 16 )) ui->deadline = now;
