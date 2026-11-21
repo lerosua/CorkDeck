@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "steam_cm.h"
+#include "../network_diag_curl.h"
 #include "steam_crypto.h"
 #include <curl/curl.h>
 #include <wslay/wslay.h>
@@ -218,6 +219,11 @@ static int upgrade(struct steam_cm *c,const char *endpoint)
         used+=n;headers[used]=0;
         if(used>=4 && !memcmp(headers+used-4,"\r\n\r\n",4))break;
     }
+    if(used>=4 && !strcmp(headers+used-4,"\r\n\r\n")) {
+        int status=0;
+        if(sscanf(headers,"HTTP/%*u.%*u %3d",&status)==1)
+            network_diag( "stage=steam.cm.upgrade http=%d", status );
+    }
     if(used<4 || strcmp(headers+used-4,"\r\n\r\n") || strncmp(headers,"HTTP/1.1 101 ",13))return 0;
     line=strstr(headers,"\r\n")+2;
     while((end=strstr(line,"\r\n")) && end!=line) {
@@ -242,6 +248,7 @@ struct steam_cm *steam_cm_connect(steam_cancel_fn cancel,void *context,unsigned 
     for(i=0;;++i){
         uint64_t until;
         steam_discover(&result,&servers,cancel,context);
+        network_diag( "stage=steam.discovery attempt=%u result=%u servers=%u", i+1, (unsigned)result.code, servers.count );
         discover_transport=result.transport_code;
         if(result.code!=STEAM_NETWORK||i==2)break;
         for(until=now_ms()+1500*(i+1);now_ms()<until&&!(cancel&&cancel(context));)pause_io();
@@ -261,6 +268,7 @@ struct steam_cm *steam_cm_connect(steam_cancel_fn cancel,void *context,unsigned 
         OPT(CURLOPT_CONNECTTIMEOUT,10L);OPT(CURLOPT_TIMEOUT,15L);OPT(CURLOPT_NOSIGNAL,1L);
         OPT(CURLOPT_NOPROGRESS,0L);OPT(CURLOPT_XFERINFOFUNCTION,progress);OPT(CURLOPT_XFERINFODATA,c);
         rc=curl_easy_perform(c->curl);
+        network_diag_curl( "steam.cm.connect", c->curl, rc );
         if(rc){c->error=200+(unsigned int)rc;goto failed;}
         if(!upgrade(c,servers.endpoint[i])){c->error=8;goto failed;}
         if(wslay_event_context_client_init(&c->ws,&cb,c)){c->error=5;goto failed;}
@@ -270,8 +278,10 @@ struct steam_cm *steam_cm_connect(steam_cancel_fn cancel,void *context,unsigned 
             steam_wire_uint(&w,1,65580);
             if(!steam_cm_send(c,9805,0,0,body,w.size))goto failed;
         }
+        network_diag( "stage=steam.cm.ready attempt=%u", i+1 );
         *error=0;return c;
 failed:
+        network_diag( "stage=steam.cm.failed attempt=%u error=%u", i+1, c->error );
         *error=c->error;steam_cm_close(c);
         if(cancel && cancel(context)){*error=1;break;}
 #undef OPT

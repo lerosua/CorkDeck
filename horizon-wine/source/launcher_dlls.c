@@ -1,4 +1,5 @@
 #include "launcher_dlls.h"
+#include "network_diag.h"
 #include "launcher.h"
 #include "launcher_ui.h"
 #include "horizon_dlls.h"
@@ -118,6 +119,9 @@ static int worker( void *opaque )
 
     Uint32 started = SDL_GetTicks();
 
+    const char *job = d->job == JOB_APPLY ? "download" : d->job == JOB_VERIFY ? "verify" : "check";
+    network_diag( "stage=dll.start job=%s transports=%u", job, connections );
+    network_diag_snapshot( "dll.link" );
     d->result = HORIZON_DLLS_OK;
     if (!connections) d->result = HORIZON_DLLS_NETWORK;
     else if (d->job == JOB_APPLY)
@@ -181,6 +185,7 @@ static int worker( void *opaque )
         set_what( d, "Reading the DLL repository" );
         d->result = horizon_dlls_fetch_manifest( &transports[0], HORIZON_DLLS_MANIFEST_URL, horizon_dll_runtime_features,
                                                  FEATURE_COUNT, &fetched, progress, d );
+        network_diag( "stage=dll.manifest.result result=%s", horizon_dlls_error( d->result ) );
         if (d->result == HORIZON_DLLS_OK)
         {
             horizon_dlls_free( &d->remote );
@@ -191,6 +196,7 @@ static int worker( void *opaque )
          * had of the repository the last time it was reached. */
         replan( d, d->job == JOB_VERIFY );
     }
+    network_diag( "stage=dll.finish job=%s result=%s", job, horizon_dlls_error( d->result ) );
     horizon_dlls_curl_close( transports, connections );
     {
         char line[400], why[160];
@@ -219,7 +225,7 @@ static int start( struct launcher_dlls *d, int job )
     SDL_AtomicSet( &d->cancel, 0 );
     SDL_AtomicSet( &d->done, 0 );
     d->thread = SDL_CreateThreadWithStackSize( worker, "horizon-dlls", 256 * 1024, d );
-    if (!d->thread) { d->job = JOB_NONE; d->result = HORIZON_DLLS_MEMORY; return 0; }
+    if (!d->thread) { network_diag( "stage=dll.worker started=0" ); d->job = JOB_NONE; d->result = HORIZON_DLLS_MEMORY; return 0; }
     return 1;
 }
 

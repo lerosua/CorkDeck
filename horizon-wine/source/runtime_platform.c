@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <switch.h>
 #include "system_language.h"
+#include "network_diag.h"
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -59,6 +60,7 @@ static void wine_nx_init_sockets(void)
     {
         Result rc = socketInitializeDefault();
         char buf[96];
+        network_diag( "stage=socket.start rc=0x%08x", (unsigned)rc );
         if (R_SUCCEEDED(rc))
         {
             wine_nx_runtime_trace( "[NET] socketInitializeDefault OK" );
@@ -72,11 +74,41 @@ static void wine_nx_init_sockets(void)
     }
 }
 
+/* Query the current configuration without asking Horizon to connect. */
+void network_diag_snapshot( const char *stage )
+{
+    NifmInternetConnectionType type;
+    NifmInternetConnectionStatus status;
+    u32 strength, addr, mask, gateway, dns1, dns2;
+    Result rc = nifmInitialize( NifmServiceType_User );
+
+    if (R_FAILED(rc))
+    {
+        network_diag( "stage=%s nifm_init=0x%08x", stage, (unsigned)rc );
+        return;
+    }
+    rc = nifmGetInternetConnectionStatus( &type, &strength, &status );
+    if (R_FAILED(rc))
+        network_diag( "stage=%s nifm_status_rc=0x%08x", stage, (unsigned)rc );
+    else
+        network_diag( "stage=%s status=%u connected=%d interface=%s strength=%u", stage,
+                      (unsigned)status, status == NifmInternetConnectionStatus_Connected,
+                      type == NifmInternetConnectionType_WiFi ? "wifi" :
+                      type == NifmInternetConnectionType_Ethernet ? "ethernet" : "unknown", (unsigned)strength );
+    rc = nifmGetCurrentIpConfigInfo( &addr, &mask, &gateway, &dns1, &dns2 );
+    if (R_FAILED(rc))
+        network_diag( "stage=%s ip_config_rc=0x%08x", stage, (unsigned)rc );
+    else
+        network_diag( "stage=%s ipv4=%d gateway=%d dns_configured=%d", stage, !!addr, !!gateway, !!(dns1 || dns2) );
+    nifmExit();
+}
+
 /* The SDL launcher performs HTTPS requests before Wine's loader and virtual
  * memory are initialized, so its socket service must be available separately. */
 void wine_nx_runtime_network_init(void)
 {
     wine_nx_init_sockets();
+    network_diag_snapshot( "startup.link" );
 }
 
 /* While the launcher is up, the socket service gets sphaira's buffers for an
@@ -105,7 +137,12 @@ void wine_nx_runtime_network_fast( int fast )
     socketExit();
     rc = fast ? socketInitialize( &downloads ) : socketInitializeDefault();
     /* Should the larger one not fit, the default still does. */
-    if (R_FAILED( rc ) && fast) rc = socketInitializeDefault();
+    network_diag( "stage=socket.%s rc=0x%08x", fast ? "download" : "default", (unsigned)rc );
+    if (R_FAILED( rc ) && fast)
+    {
+        rc = socketInitializeDefault();
+        network_diag( "stage=socket.fallback rc=0x%08x", (unsigned)rc );
+    }
     snprintf( buf, sizeof(buf), "[NET] sockets %s: rc=0x%08x", fast ? "for downloads" : "default", (unsigned)rc );
     wine_nx_runtime_trace( buf );
 }

@@ -1,4 +1,5 @@
 #include "steam_probe.h"
+#include "../network_diag_curl.h"
 #include <curl/curl.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -70,6 +71,7 @@ static void fetch(struct steam_probe_result *out, struct steam_servers *servers,
     else if (out->http_status != 200) out->code = STEAM_HTTP;
     else out->code = (servers ? steam_directory_servers(r.body, r.used, servers) : steam_directory_valid(r.body, r.used)) ? STEAM_OK : STEAM_PROTOCOL;
 done:
+    network_diag_curl( "steam.directory", curl, code );
     out->transport_code = (unsigned int)code;
     curl_easy_cleanup(curl);
     free(r.body);

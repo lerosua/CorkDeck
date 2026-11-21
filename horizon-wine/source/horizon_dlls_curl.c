@@ -3,6 +3,7 @@
  * one DNS lookup and TLS session, as sphaira's downloader does, so the second
  * connection does not pay for a handshake the first already made. */
 #include "horizon_dlls_curl.h"
+#include "network_diag_curl.h"
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -132,6 +133,13 @@ static enum horizon_dlls_result fetch_range( void *opaque, const char *url, unsi
     return perform( opaque, url, range, sink, context, progress, progress_opaque );
 }
 
+static size_t discard( void *data, size_t size, size_t count, void *opaque )
+{
+    (void)data;
+    (void)opaque;
+    return size * count;
+}
+
 /* The size of what url names, from a HEAD that follows its redirects. */
 static enum horizon_dlls_result size_of( void *opaque, const char *url, unsigned long long *size )
 {
@@ -143,10 +151,15 @@ static enum horizon_dlls_result size_of( void *opaque, const char *url, unsigned
     if (!allowed( url )) return HORIZON_DLLS_INVALID;
     curl_easy_setopt( c->curl, CURLOPT_RANGE, NULL );
     if (curl_easy_setopt( c->curl, CURLOPT_URL, url ) || curl_easy_setopt( c->curl, CURLOPT_NOBODY, 1L ))
+    {
+        network_diag( "stage=dll.bundle.head.setup failed=1" );
         return HORIZON_DLLS_NETWORK;
+    }
     code = curl_easy_perform( c->curl );
     curl_easy_getinfo( c->curl, CURLINFO_RESPONSE_CODE, &status );
     curl_easy_getinfo( c->curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &length );
+    if (code || status < 200 || status >= 300 || length <= 0)
+        network_diag_curl( "dll.bundle.head", c->curl, code );
     curl_easy_setopt( c->curl, CURLOPT_NOBODY, 0L );
     curl_easy_setopt( c->curl, CURLOPT_HTTPGET, 1L );
     if (code != CURLE_OK) return HORIZON_DLLS_NETWORK;
@@ -164,14 +177,23 @@ static enum horizon_dlls_result perform( struct horizon_dlls_curl *c, const char
     long status = 0;
 
     if (!allowed( url )) return HORIZON_DLLS_INVALID;
-    if (curl_easy_setopt( c->curl, CURLOPT_RANGE, range ) ||
-        curl_easy_setopt( c->curl, CURLOPT_URL, url ) ||
-        curl_easy_setopt( c->curl, CURLOPT_WRITEFUNCTION, receive ) ||
-        curl_easy_setopt( c->curl, CURLOPT_WRITEDATA, &t ) ||
-        curl_easy_setopt( c->curl, CURLOPT_XFERINFOFUNCTION, report ) ||
-        curl_easy_setopt( c->curl, CURLOPT_XFERINFODATA, &t ))
-        return HORIZON_DLLS_NETWORK;
-    code = curl_easy_perform( c->curl );
+    code = curl_easy_setopt( c->curl, CURLOPT_RANGE, range );
+    if (!code) code = curl_easy_setopt( c->curl, CURLOPT_URL, url );
+    if (!code) code = curl_easy_setopt( c->curl, CURLOPT_WRITEFUNCTION, receive );
+    if (!code) code = curl_easy_setopt( c->curl, CURLOPT_WRITEDATA, &t );
+    if (!code) code = curl_easy_setopt( c->curl, CURLOPT_XFERINFOFUNCTION, report );
+    if (!code) code = curl_easy_setopt( c->curl, CURLOPT_XFERINFODATA, &t );
+    if (!code) code = curl_easy_setopt( c->curl, CURLOPT_NOPROGRESS, 0L );
+    if (code)
+        network_diag( "stage=dll.get.setup curl=%d (%s)", (int)code, curl_easy_strerror( code ) );
+    else
+        code = curl_easy_perform( c->curl );
+    /* HEAD and cleanup can both invoke callbacks. The GET context lives on this stack. */
+    curl_easy_setopt( c->curl, CURLOPT_NOPROGRESS, 1L );
+    curl_easy_setopt( c->curl, CURLOPT_XFERINFOFUNCTION, NULL );
+    curl_easy_setopt( c->curl, CURLOPT_XFERINFODATA, NULL );
+    curl_easy_setopt( c->curl, CURLOPT_WRITEFUNCTION, discard );
+    curl_easy_setopt( c->curl, CURLOPT_WRITEDATA, NULL );
     curl_easy_getinfo( c->curl, CURLINFO_RESPONSE_CODE, &status );
     {
         double bytes = 0, seconds = 0, connect = 0, tls = 0;
@@ -188,6 +210,10 @@ static enum horizon_dlls_result perform( struct horizon_dlls_curl *c, const char
                   "TLS %.2f s) from %.*s", (int)code, curl_easy_strerror( code ), status, bytes / 1024, seconds,
                   seconds > 0 ? bytes / 1024 / seconds : 0, connect, tls, (int)strcspn( host, "/?" ), host );
     }
+    if (!strcmp( url, HORIZON_DLLS_MANIFEST_URL ))
+        network_diag_curl( "dll.manifest", c->curl, code );
+    else if (code || status < 200 || status >= 300 || (range && status != 206))
+        network_diag_curl( range ? "dll.range" : "dll.file", c->curl, code );
     if (t.cancelled) return HORIZON_DLLS_CANCELLED;
     if (t.stopped) return HORIZON_DLLS_IO;
     if (code != CURLE_OK) return HORIZON_DLLS_NETWORK;
@@ -212,7 +238,7 @@ static int open_one( struct horizon_dlls_transport *transport, struct horizon_dl
         curl_easy_setopt( curl, CURLOPT_LOW_SPEED_LIMIT, 1024L ) ||
         curl_easy_setopt( curl, CURLOPT_LOW_SPEED_TIME, 30L ) ||
         curl_easy_setopt( curl, CURLOPT_NOSIGNAL, 1L ) ||
-        curl_easy_setopt( curl, CURLOPT_NOPROGRESS, 0L ) ||
+        curl_easy_setopt( curl, CURLOPT_WRITEFUNCTION, discard ) ||
         /* Fewer, larger reads, as sphaira has them. */
         curl_easy_setopt( curl, CURLOPT_BUFFERSIZE, 512L * 1024 ) ||
         curl_easy_setopt( curl, CURLOPT_TCP_NODELAY, 1L ) ||

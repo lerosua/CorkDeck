@@ -200,13 +200,13 @@ static int log_flusher_running;
 /* Lines that must reach the SD card even if the process dies right after. */
 static int log_line_is_urgent( const char *line )
 {
-    return !strncmp( line, "[EXC]", 5 ) || !strncmp( line, "[EXIT]", 6 ) ||
+    return !strncmp( line, "[NETDIAG]", 9 ) || !strncmp( line, "[EXC]", 5 ) || !strncmp( line, "[EXIT]", 6 ) ||
            !strncmp( line, "[FAIL]", 6 ) || !strncmp( line, "[PE32 TEST]", 11 ) ||
            !strncmp( line, "[LIFECYCLE] final", 17 ) || !strncmp( line, "[LIFECYCLE] verdict", 19 );
 }
 
 /* Diagnostics switched off as a whole (app_settings.h): the log keeps only
- * what reports a failure, and which build wrote it. */
+ * failures, network setup events and the build that wrote them. */
 static int runtime_log_failures_only;
 
 static int log_line_is_kept( const char *line )

@@ -1,4 +1,5 @@
 #include "steam_provider.h"
+#include "../network_diag.h"
 #include "steam_auth.h"
 #include "steam_cm.h"
 #include "steam_crypto.h"
@@ -128,6 +129,7 @@ static int run(void *opaque)
     unsigned char body[256],packet[4096];struct steam_wire_writer w={body,sizeof(body),0,0};
     struct steam_cm_message m;char mod[1025]={0},exp[9]={0},encrypted[1024]={0},code[17]={0};
     uint64_t stamp=0,job=1;size_t written=0;unsigned int error=0,guard_error=0,guard_type=0,hb=30,retries=0;uint32_t session=0,cell=0;Uint32 start,last;
+    network_diag_snapshot( "steam.link" );
     if(!auth){error=5;goto done;}
     if(p->restore){
         state(p,STEAM_AUTHENTICATING,0,0,0);
@@ -141,6 +143,7 @@ connect:
     if(auth->state==STEAM_AUTH_TOKENS)goto authenticated;
     state(p,STEAM_AUTHENTICATING,0,0,0);
     if(p->qr){
+        network_diag( "stage=steam.qr.request" );
         if(!steam_auth_begin_qr(auth,job,packet,sizeof(packet),&written)){error=3;goto done;}
     }else{
     steam_wire_bytes(&w,1,p->account,strlen(p->account));
@@ -155,6 +158,7 @@ connect:
     if(!steam_cm_exchange(cm,packet,written,job,0,&m))goto done;
     steam_secret_clear(packet,sizeof(packet));
     if(!steam_auth_accept(auth,&m)){error=1000+auth->result;goto done;}
+    if(p->qr)network_diag( "stage=steam.qr.response challenge_present=%d", auth->challenge[0]!=0 );
     if(auth->confirmations & (1u<<3))guard_type=3;else if(auth->confirmations & (1u<<2))guard_type=2;
     if(!p->qr && !(auth->confirmations & ((1u<<1)|(1u<<2)|(1u<<3)|(1u<<4)))){error=10;goto done;}
     start=SDL_GetTicks();
@@ -407,7 +411,10 @@ done:
         p->view.failed_stage=(unsigned int)p->view.state;p->view.cm_type=cm?steam_cm_last_type(cm):0;
         p->view.transport_error=cm?steam_cm_error(cm):steam_cm_connect_transport();
         p->view.state=STEAM_ERROR;p->view.error=error?error:3;p->view.steam_id=0;
+        struct steam_status_view failed=p->view;
         SDL_UnlockMutex(p->mutex);
+        network_diag( "stage=steam.auth.failed state=%u error=%u cm_type=%u transport=%u",
+                      failed.failed_stage, failed.error, failed.cm_type, failed.transport_error );
     }
     /* Publish offline/error before the final cleanup check, so a Cancel racing
      * with CM shutdown either reaches this check or joins and starts a local job. */

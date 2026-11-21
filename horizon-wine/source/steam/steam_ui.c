@@ -1,4 +1,5 @@
 #include "steam_ui.h"
+#include "../network_diag.h"
 #include "steam_provider.h"
 #include "steam_wire.h"
 #include "steam_library_ui.h"
@@ -448,6 +449,12 @@ static void form_field(struct ui *ui,int y,const char *label,const char *value,i
     if(selected)ui_outline(ui,101,y+27,536,62,8,3,blue);
     ui_text_fit(ui,ui->normal,122,y+30+(56-TTF_FontHeight(ui->normal))/2,494,value,filled?ui->value:ui->dim,0);
 }
+static void request_qr(const char *trigger)
+{
+    network_diag( "stage=steam.qr.start trigger=%s", trigger );
+    if(!steam_provider_login_qr(provider))network_diag( "stage=steam.qr.start accepted=0" );
+}
+
 void steam_ui_open(struct ui *ui,const char *root)
 {
     struct steam_status_view view={0},previous={.state=(enum steam_status)-1};
@@ -460,7 +467,8 @@ void steam_ui_open(struct ui *ui,const char *root)
     if(!steam_provider_set_root(provider,root)){ui_message(ui,"Steam","Invalid installation root.");return;}
     steam_provider_status(provider,&view);
     {struct steam_session_view vault;steam_provider_session_status(provider,&vault);
-    if(view.state==STEAM_OFFLINE&&!vault.present)steam_provider_login_qr(provider);}
+    network_diag( "stage=steam.qr.screen state=%u saved_session=%d", (unsigned)view.state, !!vault.present );
+    if(view.state==STEAM_OFFLINE&&!vault.present)request_qr("auto");}
     ui_start_screen(ui);
     while(ui_begin_frame(ui)) {
         struct ui_input input;char info[160];
@@ -512,13 +520,16 @@ void steam_ui_open(struct ui *ui,const char *root)
                 if(!steam_provider_login(provider,account,password))ui_message(ui,"Steam","Unable to start sign-in.");
                 steam_secret_clear(password,sizeof(password));break;
             }
-            if(selected==3){if(vault.present)session_action(ui,0);else steam_provider_login_qr(provider);break;}
+            if(selected==3){if(vault.present)session_action(ui,0);else request_qr("manual");break;}
         }
         steam_provider_status(provider,&view);steam_provider_challenge(provider,challenge);
         if(view.state==STEAM_ONLINE)steam_secret_clear(password,sizeof(password));
         if(strcmp(challenge,last)){
             steam_secret_clear(qr,sizeof(qr));steam_secret_clear(temp,sizeof(temp));valid_qr=0;
-            if(challenge[0])valid_qr=qrcodegen_encodeText(challenge,temp,qr,qrcodegen_Ecc_MEDIUM,1,12,qrcodegen_Mask_AUTO,true);
+            if(challenge[0]){
+                valid_qr=qrcodegen_encodeText(challenge,temp,qr,qrcodegen_Ecc_MEDIUM,1,12,qrcodegen_Mask_AUTO,true);
+                network_diag( "stage=steam.qr.encode success=%d", valid_qr );
+            }
             strcpy(last,challenge);steam_secret_clear(temp,sizeof(temp));
         }
         ui_background(ui);ui_header_back(ui,"Steam account",NULL);
@@ -622,6 +633,7 @@ void steam_ui_sign_in(struct ui *ui,const char *root)
     steam_ui_prepare(root);
     if(!provider){ui_message(ui,"Steam","Unable to create provider.");return;}
     steam_provider_status(provider,&v);steam_provider_session_status(provider,&vault);
+    network_diag( "stage=steam.sign_in state=%u saved_session=%d", (unsigned)v.state, !!vault.present );
     if(v.state==STEAM_ONLINE){steam_ui_settings(ui,root);return;}
     if(vault.present)session_action(ui,0);
     else steam_ui_open(ui,root);

@@ -30,7 +30,7 @@ After the upgrade:
 - **If you used an overclocking profile in 0.2**, open the Horizon OC overlay and look at the section of the application CorkDeck: a profile 0.2 wrote there may still be stored, and 0.3 does not touch it. CorkDeck tells you once when it finds the mark of such a profile on the card.
 - The Hekate entry keeps working under its old name. To have it called CorkDeck, run **− → Maintenance → First set-up** again; this rewrites the boot entry and patches, so back up `atmosphere` and `bootloader` first.
 - **Maintenance → About CorkDeck** shows the version: it should read 0.3e.
-- Diagnostics are off by default now. Turn on **Settings → Diagnostics → Developer mode** before collecting logs for a report.
+- Diagnostics are off by default now. Turn on **Settings → Diagnostics → Developer mode** for detailed runtime traces. The network events below are also recorded with developer mode off.
 
 ## Add games
 
@@ -48,6 +48,17 @@ For Steam, use **− → Maintenance → Steam account**, sign in with QR or pas
 | L / R | Library tabs |
 
 Exit through **− → Power → Close CorkDeck**. Reports are under `switch/wine/reports`, logs under `switch/wine/logs`. Review and redact before sharing; never share `steam-session.vault`.
+
+## Collect a DLL or Steam QR network log
+
+On a build with network diagnostics, start CorkDeck, select **Maintenance → Windows components → Check again** and retry the download, then open **Steam account** in the same session. If the QR code is missing, select **Generate QR code** and wait for a result. Exit through **− → Power → Close CorkDeck**.
+
+On the SD card, open `switch/wine/logs/autorun_runtime.log`. Share the lines containing `[NETDIAG]` in order. After another launch, the previous run is in `autorun_runtime.1.log`, then `autorun_runtime.2.log`. The separate `steam-diagnostic.log` holds only the most recent sign-in status.
+
+- `startup.link`, `dll.link` and `steam.link` record Horizon's interface status and whether IPv4, a gateway and DNS are configured. A service query failure includes the Horizon result code.
+- `dll.manifest` and `steam.directory` report the curl result, HTTP status and timing. For example, `curl=6` with `http=0` means hostname resolution failed before an HTTP response arrived. `dll.finish` also reports local validation and SD write failures.
+- `steam.cm.*` covers connecting to Steam's connection manager and upgrading to WebSocket. `steam.qr.response` records whether Steam supplied a challenge. `steam.qr.encode` records whether the launcher could encode it for display. A saved session may route sign-in to unlock instead.
+- Network events use the console clock (Unix seconds) and omit credentials, session tokens, QR contents and Wi-Fi names.
 
 ## Removal
 
