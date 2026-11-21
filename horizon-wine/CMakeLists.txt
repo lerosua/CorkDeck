@@ -682,7 +682,7 @@ target_sources(wine-nx-runtime PRIVATE
     source/steam/steam_library_ui.c source/steam/steam_prerequisites.c source/steam/steam_prerequisites_ui.c source/steam/steam_local.c
     source/steam/steam_install_script.c
     source/steam/steam_cdn.c source/steam/steam_diagnostics.c source/steam/steam_file.c
-    source/steam/steam_artwork.c source/diagnostics/lan_log.c
+    source/steam/steam_artwork.c source/steam/steam_compat.c source/steam/steam_compat_store.c source/diagnostics/lan_log.c
     vendor/qrcodegen/qrcodegen.c
     source/launcher_setup.c source/setup_boot.c source/forwarder.c
     source/launcher_dlls.c source/horizon_dlls.c source/horizon_dlls_curl.c
@@ -1000,7 +1000,7 @@ set_source_files_properties(source/launcher.c source/launcher_catalog.c source/l
     COMPILE_DEFINITIONS _REENTRANT)
 # The mark in the corner is only there in the build that generates it.
 set_property(SOURCE source/launcher.c APPEND PROPERTY COMPILE_DEFINITIONS WINE_NX_HAS_EMBEDDED_LOGO)
-set_source_files_properties(source/steam/steam_prerequisites_ui.c source/steam/steam_ui.c source/steam/steam_provider.c source/steam/steam_library_ui.c source/steam/steam_install.c source/steam/steam_engine.c source/steam/steam_content.c source/steam/steam_artwork.c PROPERTIES
+set_source_files_properties(source/steam/steam_prerequisites_ui.c source/steam/steam_ui.c source/steam/steam_provider.c source/steam/steam_library_ui.c source/steam/steam_install.c source/steam/steam_engine.c source/steam/steam_content.c source/steam/steam_artwork.c source/steam/steam_compat_store.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"
     COMPILE_DEFINITIONS _REENTRANT)
 target_link_libraries(wine-nx-runtime PRIVATE

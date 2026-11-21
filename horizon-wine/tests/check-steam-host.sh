@@ -12,6 +12,8 @@ $cc $flags -Wno-deprecated-declarations "$root/tests/steam_prerequisites_host.c"
 $cc $flags "$root/tests/steam_wire.c" "$root/source/steam/steam_wire.c" \
     "$root/source/steam/steam_cm_message.c" "$root/source/steam/steam_auth.c" -lm -o "$build/wire"
 "$build/wire"
+$cc $flags "$root/tests/steam_compat.c" "$root/source/steam/steam_compat.c" -o "$build/compat"
+"$build/compat"
 $cc $flags "$root/tests/steam_directory.c" "$root/source/steam/steam_directory.c" -o "$build/directory"
 "$build/directory"
 $cc $flags "$root/tests/steam_crypto.c" "$root/source/steam/steam_crypto.c" \

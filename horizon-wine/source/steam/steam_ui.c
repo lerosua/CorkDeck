@@ -1,4 +1,5 @@
 #include "steam_ui.h"
+#include "steam_compat.h"
 #include "../network_diag.h"
 #include "steam_provider.h"
 #include "steam_wire.h"
@@ -34,7 +35,7 @@ void steam_ui_prepare(const char *root)
 {if(!provider)provider=steam_provider_create();if(provider)steam_provider_set_root(provider,root);}
 void steam_ui_set_launcher(const struct steam_launcher_adapter *a){launcher=*a;}
 void steam_ui_shutdown(void)
-{steam_provider_destroy(provider);provider=NULL;registered_app=0;removed_generation=0;diagnostic_tick=0;diagnostic_app=0;diagnostic_state=STEAM_DOWNLOAD_IDLE;diagnostic_error=0;}
+{steam_compat_shutdown();steam_provider_destroy(provider);provider=NULL;registered_app=0;removed_generation=0;diagnostic_tick=0;diagnostic_app=0;diagnostic_state=STEAM_DOWNLOAD_IDLE;diagnostic_error=0;}
 static int prompt(const char *title,int secret,char *out,size_t capacity)
 {
     memset(out,0,capacity);

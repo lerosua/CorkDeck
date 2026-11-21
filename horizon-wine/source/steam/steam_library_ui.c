@@ -1,6 +1,7 @@
 #include "steam_library_ui.h"
 #include "../launcher_ui.h"
 #include "steam_content.h"
+#include "steam_compat.h"
 #include "steam_provider.h"
 #include "steam_storage.h"
 #include "steam_artwork.h"
@@ -138,11 +139,52 @@ static int register_game(struct ui *ui, const char *root,
              "third-party launcher may be required.");
   return 1;
 }
+static const char *store_status(enum store_state state)
+{
+    return state == STORE_PENDING ? "Reading Steam store..." : "Store data unavailable";
+}
+
+static void draw_compatibility(struct ui *ui, uint32_t app)
+{
+    static const char *const ratings[] = {"Not rated", "Unsupported", "Playable", "Verified"};
+    struct steam_compat_view view;
+    char line[544];
+    steam_compat_status(app, &view);
+    const struct steam_minimum *m = &view.minimum;
+    const char *record = steam_compat_record(app);
+    const char *reason = record;
+    if (!reason)
+        reason = view.windows == STORE_READY ? steam_compat_estimate(m) : store_status(view.windows);
+    ui_text(ui, ui->normal, 438, 210, record ? "CorkDeck on Switch (tested)" : "Switch estimate (untested)", ui->value);
+    ui_text_wrapped(ui, ui->small, 438, 248, 742, 2, reason, ui->text, 0);
+
+    const char *summary = view.windows == STORE_READY ? "Not specified" : store_status(view.windows);
+    if (m->memory[0] || m->directx[0])
+        snprintf(line, sizeof(line), "%s   %s%s%s%s", ui_translate(ui, "Windows minimum"),
+                 m->memory, m->memory[0] && m->directx[0] ? "  /  " : "",
+                 m->directx[0] ? "DirectX " : "", m->directx);
+    else
+        snprintf(line, sizeof(line), "%s   %s", ui_translate(ui, "Windows minimum"), ui_translate(ui, summary));
+    ui_text_fit(ui, ui->small, 438, 311, 745, line, ui->value, 0);
+    if (m->processor[0]) {
+        snprintf(line, sizeof(line), "CPU   %s", m->processor);
+        ui_text_fit(ui, ui->small, 438, 340, 745, line, ui->dim, 1);
+    }
+    if (m->graphics[0]) {
+        snprintf(line, sizeof(line), "GPU   %s", m->graphics);
+        ui_text_fit(ui, ui->small, 438, 368, 745, line, ui->dim, 1);
+    }
+    const char *deck = view.deck == STORE_READY ? ratings[view.deck_category] : store_status(view.deck);
+    snprintf(line, sizeof(line), "Steam Deck   %s", ui_translate(ui, deck));
+    ui_text_fit(ui, ui->normal, 438, 406, 745, line, ui->value, 0);
+}
 int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
                          const char *root, const struct steam_game *g,
                          const struct steam_launcher_adapter *adapter,struct steam_artwork *art) {
   char text[768], size[40], language[32];
   int prerequisite_queued=0;
+  const int button_y = g->installed ? 456 : 539;
+  if (!g->installed) steam_compat_request(g->app_id, 0);
   struct steam_app_view app;
   struct steam_remove_view removal;
   steam_provider_inspect(p, g->app_id);
@@ -153,7 +195,7 @@ int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
     steam_provider_remove_status(p, &removal);
     steam_artwork_request(art,g->app_id);steam_artwork_tick(art,ui->renderer);
     while (ui_poll(ui, &input)) {
-      if(input.touch==UI_TOUCH_TAP&&input.x>=438&&input.x<750&&input.y>=456&&input.y<514)input.button=UI_A;
+      if(input.touch==UI_TOUCH_TAP&&input.x>=438&&input.x<750&&input.y>=button_y&&input.y<button_y+58)input.button=UI_A;
       if (input.button == UI_B || (input.touch == UI_TOUCH_TAP && input.y < 80))
         goto done;
       if (input.button == UI_X && g->installed == 1) {
@@ -169,6 +211,7 @@ int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
         ui_start_screen(ui);break;
       }
       if (input.button == UI_PLUS) {
+        if (!g->installed) steam_compat_request(g->app_id, 1);
         steam_provider_refresh_library(p);
         steam_provider_inspect(p, g->app_id);
         break;
@@ -241,22 +284,25 @@ int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
     ui_background(ui);
     ui_header_back(ui,"Steam game",g->installed==2?"Removal pending":g->installed?"Installed":"Available to install");
     artwork_draw(ui,art,g->app_id,(SDL_Rect){84,126,300,450},18,255);
-    ui_text_wrapped(ui,ui->large,438,142,735,2,g->name,ui->value,0);
+    ui_text_wrapped(ui,ui->large,438,g->installed?142:112,735,2,g->name,ui->value,0);
     bytes(size,app.size);
     if(app.language_missing && app.app_id==g->app_id && app.state==2)snprintf(size,sizeof(size),"Choose language first");
     snprintf(text,sizeof(text),"Installation  %s%s",app.app_id==g->app_id&&app.state==2?(app.language_missing?size:app.size?size:"Size unavailable"):app.app_id==g->app_id&&app.state==3?"Unavailable":"Reading Steam metadata...",app.app_id==g->app_id&&app.state==2&&app.size&&!app.language_missing?" (estimate)":"");
-    ui_text(ui,ui->normal,438,274,text,ui->value);
+    ui_text(ui,ui->normal,438,g->installed?274:458,text,ui->value);
     steam_provider_language(p,language);
     /* English stands in by itself for a language the game has no files in. */
     if(app.app_id==g->app_id&&app.state==2&&app.english_fallback)
       snprintf(text,sizeof(text),"Language  English (no files in %s)   /   %s",language,g->shared?"Steam Families":"Owned library");
     else
     snprintf(text,sizeof(text),"Language  %s%s   /   %s",language,app.app_id==g->app_id&&app.state==2&&app.language_missing?" (choose alternative)":"",g->shared?"Steam Families":"Owned library");
-    ui_text(ui,ui->small,438,328,text,ui->dim);
-    ui_text(ui,ui->small,438,366,"Compatibility  Unknown",ui->dim);
-    ui_text_wrapped(ui,ui->small,438,397,720,2,"Exact installation size and free SD space are checked before downloading.",ui->dim,0);
-    ui_rounded(ui,438,456,312,58,14,(SDL_Color){92,194,74,255});
-    ui_text_centered(ui,ui->normal,594,469,g->installed?"Add to the library":"Install",(SDL_Color){6,32,10,255});
+    ui_text(ui,ui->small,438,g->installed?328:502,text,ui->dim);
+    if (!g->installed) draw_compatibility(ui, g->app_id);
+    else {
+      ui_text(ui,ui->small,438,366,"Compatibility  Unknown",ui->dim);
+      ui_text_wrapped(ui,ui->small,438,397,720,2,"Exact installation size and free SD space are checked before downloading.",ui->dim,0);
+    }
+    ui_rounded(ui,438,button_y,312,58,14,(SDL_Color){92,194,74,255});
+    ui_text_centered(ui,ui->normal,594,button_y+13,g->installed?"Add to the library":"Install",(SDL_Color){6,32,10,255});
     if (removal.error && removal.app_id == g->app_id) {
       snprintf(text, sizeof(text),
                "Uninstall error %u. Retry Delete game; check SD permissions "
@@ -266,7 +312,7 @@ int steam_library_ui_game(struct ui *ui, struct steam_provider *p,
     }
     if (app.state == 3 && app.app_id == g->app_id) {
       snprintf(text, sizeof(text), "Steam metadata error %u", app.error);
-      ui_text(ui, ui->small, 84, 594, text, ui->danger);
+      ui_text(ui, ui->small, 84, g->installed?594:609, text, ui->danger);
     }
     if (g->installed) {
       const struct ui_hint h[] = {{UI_A, "Add / Choose executable"},
