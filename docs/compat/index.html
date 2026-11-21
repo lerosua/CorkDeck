@@ -1,0 +1,10 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CorkDeck · Switch 游戏实测</title>
+<style>
+*{box-sizing:border-box}html{color-scheme:dark}body{margin:0;background:#11171c;color:#eef4f1;font:16px/1.55 "DM Sans",system-ui,sans-serif}main{max-width:1080px;margin:auto;padding:44px 5vw}header,nav,.tools,.entry header{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}header{border-bottom:1px solid #374149;padding-bottom:18px}b{letter-spacing:.02em}a{color:#9fe5bd}nav a:first-child{color:white}h1{font-size:clamp(30px,5vw,52px);margin:42px 0 8px;line-height:1.15}p{color:#acbbb6;margin:0 0 22px}.tools{justify-content:flex-start}label{display:grid;gap:5px;color:#becac5}input,select{background:#1d282e;color:white;border:1px solid #54636a;border-radius:6px;padding:9px 12px;font:inherit}input{width:min(390px,83vw)}article{padding:22px 0;border-bottom:1px solid #374149}h2{margin:0;font-size:21px}.entry header{border:none;padding:0}small{color:#adbbb6}ul{list-style:none;padding:0;margin:12px 0 0}li+li{margin-top:14px}strong{color:#a9dccc}.meta{font-size:14px;color:#b2c1bb}#status{margin:20px 0 0}a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #a9e3bd}
+</style>
+<main><header><b>CorkDeck</b><nav><a href="https://github.com/lerosua/CorkDeck">项目仓库</a><a id="report" href="https://github.com/lerosua/CorkDeck/issues/new?template=compatibility.yml">上报实测</a></nav></header>
+<h1>Switch 游戏实测</h1><p>查看同一 Steam 版本在 CorkDeck 上实际运行到了哪一步。</p>
+<div class="tools"><label>游戏名或 AppID<input id="query" type="search" placeholder="例如：耻辱、Dishonored、205100"></label><label>实测结果<select id="stage"><option value="">全部结果</option></select></label></div>
+<p id="status" role="status">正在读取实测列表…</p><section id="games"></section><noscript><a href="https://github.com/lerosua/CorkDeck/blob/codex/chinese-menu/docs/compat/reports.tsv">打开 GitHub 可搜索列表</a></noscript></main>
+<script src="list.js" defer></script></html>

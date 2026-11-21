@@ -1,0 +1,52 @@
+name: 游戏兼容性实测
+description: 分享在 Switch 上运行 Windows 游戏的实际进度和设置
+title: "[实测] "
+body:
+  - type: markdown
+    attributes:
+      value: 请填写实际到达的阶段。下载、登录或安装失败请使用故障报告。无需上传完整日志或任何账户信息。
+  - type: input
+    id: appid
+    attributes:
+      label: Steam AppID
+      placeholder: "205100"
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: 游戏名
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: CorkDeck 版本
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 实测结果
+      options:
+        - 启动失败
+        - 仅到启动流程
+        - 游戏中遇阻
+        - 可持续游玩
+        - 已通关
+    validations:
+      required: true
+  - type: textarea
+    id: detail
+    attributes:
+      label: 实测说明
+      description: 写明到达的菜单或关卡、游玩时长。失败请记录卡点或错误码。
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: 运行设置
+      description: Switch 型号、游戏版本、转译器、渲染器，以及用到的特殊设置。
+    validations:
+      required: true

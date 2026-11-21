@@ -1,0 +1,9 @@
+AppID	游戏	CorkDeck 版本	实测结果	实测说明	运行设置	来源
+7940	使命召唤 4 / Call of Duty 4	0.2	仅到启动流程	已显示开场标志，关卡未测。	未记录	https://github.com/lerosua/CorkDeck/blob/3543b7057fd08175819ae9295888fb0947fa7b33/docs/COMPATIBILITY.md
+22300	辐射 3 / Fallout 3	0.2	仅到启动流程	启动 Fallout3Launcher.exe 后进入主菜单，关卡未测。	未记录	https://github.com/lerosua/CorkDeck/blob/3543b7057fd08175819ae9295888fb0947fa7b33/docs/COMPATIBILITY.md
+329860	Catlateral Damage	早期开发版	仅到启动流程	已进入主菜单，关卡未测。	未记录	https://github.com/lerosua/CorkDeck/blob/3543b7057fd08175819ae9295888fb0947fa7b33/docs/COMPATIBILITY.md
+205100	耻辱 / Dishonored	0.2	仅到启动流程	已进入主菜单，菜单约 24 FPS，关卡未测。	未记录	https://github.com/lerosua/CorkDeck/blob/3543b7057fd08175819ae9295888fb0947fa7b33/docs/COMPATIBILITY.md
+15100	刺客信条 / Assassin’s Creed	0.3e	仅到启动流程	Steam 版已播放开场动画，主菜单和关卡未测。	未记录	https://github.com/lerosua/CorkDeck/blob/3543b7057fd08175819ae9295888fb0947fa7b33/docs/COMPATIBILITY.md
+17410	镜之边缘 / Mirror’s Edge	未记录	启动失败	启动器检查 Steam 客户端库签名，游戏无法启动。	未记录	https://github.com/lerosua/CorkDeck/blob/3543b7057fd08175819ae9295888fb0947fa7b33/docs/COMPATIBILITY.md
+42700	使命召唤：黑色行动 / Call of Duty: Black Ops	未记录	启动失败	Steam 版需要客户端生成可执行文件，首帧前退出。	未记录	https://github.com/lerosua/CorkDeck/blob/3543b7057fd08175819ae9295888fb0947fa7b33/docs/COMPATIBILITY.md
+223850	3DMark	未记录	启动失败	需要 Steam 客户端和系统信息服务，无法启动。	未记录	https://github.com/lerosua/CorkDeck/blob/3543b7057fd08175819ae9295888fb0947fa7b33/docs/COMPATIBILITY.md
