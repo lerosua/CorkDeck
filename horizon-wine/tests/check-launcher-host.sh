@@ -28,11 +28,11 @@ clang() {
 
 # The icons embedded in the launcher must match assets/, and fill as SVG does.
 python3 "$horizon_wine/tools/make-launcher-icons.py" --check
-clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+clang -std=gnu11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     "$horizon_wine/tests/launcher_svg.c" "$horizon_wine/source/launcher_svg.c" -lm -o "$build/launcher_svg"
 "$build/launcher_svg"
 
-clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+clang -std=gnu11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     "$horizon_wine/tests/launcher_catalog.c" "$horizon_wine/source/launcher_catalog.c" -o "$build/launcher_catalog"
 
 # The three NCAs a forwarder is made of, built here and taken apart again: the
@@ -45,7 +45,7 @@ done
 if [ -n "$npdm" ]; then
     mkdir -p "$build/switch-shim" "$build/ncas"
     cp "$horizon_wine/tests/switch_shim.h" "$build/switch-shim/switch.h"
-    clang -std=gnu11 -Wall -Wextra -Werror -Wno-unused-parameter -O1 -g \
+    clang -std=gnu11 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-unused-parameter -O1 -g \
         -fsanitize=address,undefined -fno-omit-frame-pointer \
         -I "$horizon_wine/tests" -I "$build/switch-shim" \
         "$horizon_wine/tests/forwarder_build.c" -o "$build/forwarder_build"
@@ -55,11 +55,11 @@ else
 fi
 "$build/launcher_catalog"
 
-clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined \
+clang -std=gnu11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g -fsanitize=address,undefined \
     $(sdl2-config --cflags) "$horizon_wine/tests/launcher_audio.c" $(sdl2-config --libs) -lm -o "$build/launcher_audio"
 "$build/launcher_audio"
 
-clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+clang -std=gnu11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     $(sdl2-config --cflags) -I/opt/homebrew/include \
     "$horizon_wine/tests/launcher_image.c" "$horizon_wine/source/launcher_image.c" \
     $(sdl2-config --libs) -L/opt/homebrew/lib -lpng -lturbojpeg -o "$build/launcher_image"
@@ -67,7 +67,7 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
 
 
 python3 "$horizon_wine/tools/make-embed.py" "$build/forwarder-icon.c" corkdeck_default_covers "$horizon_wine/assets/default-covers.jpg" wine_nx_icon_any "$horizon_wine/assets/autorun.jpg" \
-    corkdeck_font "$horizon_wine/assets/fonts/CorkDeckUI.ttf"
+    corkdeck_font "$horizon_wine/assets/fonts/CorkDeckUI.ttf" steam_community_seed "$horizon_wine/../docs/compat/reports.tsv"
 # Everything the shell is made of, except what tests/launcher_host.c stands in
 # for (the DLL manager's screens and the platform): the list tests/shell-stand.sh
 # builds for pictures, here with the sanitizers and no warning let through.
@@ -81,7 +81,7 @@ for file in "$horizon_wine"/source/steam/*.c "$horizon_wine"/source/app/*.c "$ho
     [ -f "$file" ] && sources="$sources $file"
 done
 # shellcheck disable=SC2086
-clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+clang -std=gnu11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -I "$horizon_wine/source" $(sdl2-config --cflags) -I/opt/homebrew/include -I/opt/homebrew/opt/openssl/include \
     $sources $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -lturbojpeg -lcurl -lwslay -lmbedcrypto \
     -lminizip -llzma -lzstd -lz -L/opt/homebrew/opt/openssl/lib -lcrypto -lpthread -lm -o "$build/launcher_host"
@@ -89,7 +89,7 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
 [ ! -f /opt/homebrew/lib/libSDL3.0.dylib ] || ln -s /opt/homebrew/lib/libSDL3.0.dylib "$build/libSDL3.dylib"
 
 # The floating keyboard: what its buttons and taps send, and its picture.
-clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+clang -std=gnu11 -Wall -Wextra -Werror -Wno-deprecated-declarations -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
     -I "$horizon_wine/source" $(sdl2-config --cflags) -I/opt/homebrew/include \
     "$horizon_wine/tests/osk.c" "$horizon_wine/source/osk.c" \
     $(sdl2-config --libs) -L/opt/homebrew/lib -lSDL2_ttf -lpng -o "$build/osk"

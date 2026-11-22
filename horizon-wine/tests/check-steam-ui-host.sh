@@ -7,7 +7,7 @@ trap 'rm -rf "$build"' EXIT HUP INT TERM
 mkdir -p "$build/logs"
 python3 "$root/tools/make-embed.py" "$build/seed.c" corkdeck_default_covers "$root/assets/default-covers.jpg" steam_community_seed "$root/../docs/compat/reports.tsv"
 cc=${CC:-cc}
-$cc -std=gnu11 -Wall -Wextra -Werror -no-pie -fsanitize=address,undefined \
+$cc -std=gnu11 -Wall -Wextra -Werror -Wno-deprecated-declarations -no-pie -fsanitize=address,undefined \
     $(sdl2-config --cflags) "$root/tests/steam_ui_host.c" \
     "$root/source/steam/steam_ui.c" "$root/source/steam/steam_wire.c" \
     "$root/source/steam/steam_prerequisites.c" "$root/source/steam/steam_prerequisites_ui.c" "$root/source/steam/steam_library_ui.c" "$root/source/steam/steam_content.c" \

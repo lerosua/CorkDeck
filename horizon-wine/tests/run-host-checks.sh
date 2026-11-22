@@ -14,7 +14,7 @@ fi
 cd "$repo"
 export SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy
 export LAUNCHER_FONT="$repo/horizon-wine/assets/fonts/CorkDeckUI.ttf"
-[ "$#" -gt 0 ] || set -- steam ui shell launcher cdn
+[ "$#" -gt 0 ] || set -- steam ui shell launcher cdn wine
 for suite do
     case "$suite" in
         steam) script=check-steam-host.sh ;;
@@ -22,6 +22,7 @@ for suite do
         shell) script=check-steam-shell-host.sh ;;
         launcher) script=check-launcher-host.sh ;;
         cdn) script=check-steam-cdn-host.sh ;;
+        wine) script=check-wine-host.sh ;;
         *) echo "Unknown host suite: $suite" >&2; exit 2 ;;
     esac
     echo "Running $suite host checks"

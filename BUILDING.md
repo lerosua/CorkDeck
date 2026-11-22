@@ -221,6 +221,32 @@ The fixtures use synthetic accounts and files. They do not connect to Steam
 or install anything on the Switch. Full launcher checks also require the
 built loader NPDM (run the NRO build above first).
 
+### Validation of the split Chinese-menu changes (2026-11-22)
+
+`run-host-checks.sh` covers six suites: Steam download/storage, library UI,
+shell integration, the full launcher, local HTTPS/CDN checks, and Wine's
+pipe/thread/async/wait primitives. All six passed in the ARM64 host image.
+Deprecated host curl APIs are allowed without suppressing other warnings;
+Switch filesystem code is exercised with the dedicated FS shim instead of
+being linked into the Linux launcher.
+
+The native Mac OpenGL compositor test also passed all 28 checks:
+
+```sh
+check_dir=$(mktemp -d)
+clang -Wall -Wextra -Werror -I horizon-wine/source -framework OpenGL   -o "$check_dir/compositor-test" horizon-wine/tests/compositor_test.c   horizon-wine/source/compositor.c horizon-wine/source/compositor_gl.c
+"$check_dir/compositor-test"
+```
+
+The runtime was rebuilt with the 2026.10.12 ARM64 Switch image and the
+existing `build-switch-resume-io` configuration. Offline package verification
+reported `current=1605 pending=0 unsupported=4 skipped=2`, `ready=1`.
+NRO SHA-256: `3e8503df8fb5f147a1361124c59a93b0f16c4f30d21183a16e7975a35489599a`.
+These are build and host-fixture results; no new Switch playability claim is
+made. The independent SystemModule renderer is isolated on
+`codex/electron-renderer-experiment`, remains paused at the memory limit in
+[TODO.md](TODO.md), and is absent from this branch's runtime sources.
+
 ## Historical upstream baseline on Linux/WSL
 
 Baseline revision: `91107d45eb3204ff80d3637bfa37cefd021a3a1c`.

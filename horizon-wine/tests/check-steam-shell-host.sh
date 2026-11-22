@@ -8,7 +8,7 @@ build=$(mktemp -d)
 trap 'rm -rf "$build"' EXIT HUP INT TERM
 python3 "$root/tools/make-embed.py" "$build/icon.c" corkdeck_default_covers "$root/assets/default-covers.jpg" wine_nx_icon_any "$root/assets/autorun.jpg" \
     corkdeck_font "$root/assets/fonts/CorkDeckUI.ttf" steam_community_seed "$root/../docs/compat/reports.tsv"
-clang -std=gnu11 -Wall -Wextra -Werror $(sdl2-config --cflags) \
+clang -std=gnu11 -Wall -Wextra -Werror -Wno-deprecated-declarations $(sdl2-config --cflags) \
     "$root/tests/chinese_menu.c" "$root/source/app/app_settings.c" \
     $(sdl2-config --libs) -lSDL2_ttf -o "$build/chinese-menu"
 "$build/chinese-menu" "$root/assets/fonts/CorkDeckUI.ttf"
@@ -30,7 +30,7 @@ for target in launcher steam-adapter; do
         sources="$root/tests/steam_launcher_adapter_host.c"
     fi
     # shellcheck disable=SC2086
-    clang -std=gnu11 -Wall -Wextra -Werror -no-pie -g -fsanitize=address,undefined \
+    clang -std=gnu11 -Wall -Wextra -Werror -Wno-deprecated-declarations -no-pie -g -fsanitize=address,undefined \
         -I "$root/source" $(sdl2-config --cflags) $sources $common \
         $(sdl2-config --libs) -lSDL2_ttf -lpng -lturbojpeg -lcurl -lwslay -lmbedcrypto \
         -lminizip -llzma -lzstd -lz -lcrypto -lpthread -lm -o "$build/$target"

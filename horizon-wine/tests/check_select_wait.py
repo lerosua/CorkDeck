@@ -56,6 +56,7 @@ static struct horizon_user_apc *horizon_server_take_user_apc_locked(struct horiz
 static void horizon_report_user_apc(const char *w, unsigned t, unsigned s, unsigned st) {
     (void)w; (void)t; (void)s; (void)st; }
 static void horizon_server_quit_check_locked(void) {}
+volatile int wine_nx_quit_requested;
 /* A socket operation ready for the thread comes back as a system APC, and its
  * result with the next select (check_horizon_async_sockets.py runs both). */
 static unsigned async_ready_on, async_given, results_taken, signal_and_wait;
