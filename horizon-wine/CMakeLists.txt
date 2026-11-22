@@ -626,6 +626,7 @@ target_link_libraries(autorun-game-forwarder PRIVATE nx)
 
 add_executable(wine-nx-runtime
     source/runtime.c
+    source/electron_probe.c
     source/performance.c
     source/dxvk_releases.c
     source/runtime_platform.c
@@ -640,6 +641,7 @@ add_executable(wine-nx-runtime
     source/thread_profile.c
     source/shader_ram_cache.c
     source/compositor.c
+    source/startup_panel.c
     source/osk.c
     source/compositor_gl.c
     source/compositor_egl.c
@@ -1005,7 +1007,7 @@ endif()
 # functions come through eglGetProcAddress, so it works over either Mesa.
 find_library(SWITCH_SDL2 SDL2 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_SDL2_TTF SDL2_ttf HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
-set_source_files_properties(source/shell/default_cover.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/steamgriddb.c source/dxvk_releases.c source/osk.c PROPERTIES
+set_source_files_properties(source/shell/default_cover.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/steamgriddb.c source/dxvk_releases.c source/osk.c source/startup_panel.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"
     COMPILE_DEFINITIONS _REENTRANT)
 # The mark in the corner is only there in the build that generates it.

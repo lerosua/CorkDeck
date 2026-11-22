@@ -24,6 +24,10 @@
 #endif
 
 #include <assert.h>
+#ifdef __SWITCH__
+#include <errno.h>
+#include <stdio.h>
+#endif
 
 #include "ntstatus.h"
 #include "ntgdi_private.h"
@@ -5753,13 +5757,75 @@ void destroy_thread_windows(void)
     }
 }
 
+#ifdef __SWITCH__
+extern int wine_nx_electron_probe_active(void) __attribute__((weak));
+extern void wine_nx_probe_set_window_phase( int phase ) __attribute__((weak));
+extern void wine_nx_runtime_trace( const char *line ) __attribute__((weak));
+
+static unsigned int probe_window_begin( const UNICODE_STRING *name, HWND parent, DWORD style,
+                                        DWORD ex_style, int width, int height )
+{
+    static unsigned int sequence;
+    unsigned int id, i = 0;
+    char line[300], label[96];
+    DWORD error;
+    int saved_errno;
+
+    if (!wine_nx_electron_probe_active || !wine_nx_electron_probe_active() || !wine_nx_runtime_trace) return 0;
+    error = RtlGetLastWin32Error();
+    saved_errno = errno;
+    id = __atomic_add_fetch( &sequence, 1, __ATOMIC_RELAXED );
+    if (name && IS_INTRESOURCE(name->Buffer))
+        snprintf( label, sizeof(label), "#%u", (unsigned int)(ULONG_PTR)name->Buffer );
+    else
+    {
+        for (; name && i < name->Length / sizeof(WCHAR) && i + 1 < sizeof(label); ++i)
+            label[i] = name->Buffer[i] >= 32 && name->Buffer[i] < 127 ? name->Buffer[i] : '?';
+        label[i] = 0;
+    }
+    snprintf( line, sizeof(line), "[EPROBE] window id=%u tid=%u api=NtUserCreateWindowEx phase=enter "
+              "class=%s parent=%p style=%#x ex_style=%#x size=%dx%d", id, (unsigned int)GetCurrentThreadId(),
+              label, parent, (unsigned int)style, (unsigned int)ex_style, width, height );
+    wine_nx_runtime_trace( line );
+    RtlSetLastWin32Error( error );
+    errno = saved_errno;
+    return id;
+}
+
+static void probe_window_step( unsigned int id, HWND hwnd, const char *api, BOOL returned, ULONG_PTR value )
+{
+    char line[256];
+    DWORD error = RtlGetLastWin32Error();
+    int saved_errno = errno;
+
+    if (returned)
+        snprintf( line, sizeof(line), "[EPROBE] window id=%u hwnd=%p api=%s phase=return ret=%#llx "
+                  "last_error_snapshot=0x%08x", id, hwnd, api, (unsigned long long)value, (unsigned int)error );
+    else
+        snprintf( line, sizeof(line), "[EPROBE] window id=%u hwnd=%p api=%s phase=enter", id, hwnd, api );
+    wine_nx_runtime_trace( line );
+    RtlSetLastWin32Error( error );
+    errno = saved_errno;
+}
+
+/* Keep the entry on disk before a window procedure or driver can block or terminate. */
+#define PROBE_WINDOW_CALL(id, hwnd, api, call) \
+    ({ __typeof__(call) result; \
+       if (id) probe_window_step( id, hwnd, api, FALSE, 0 ); \
+       result = (call); \
+       if (id) probe_window_step( id, hwnd, api, TRUE, (ULONG_PTR)result ); \
+       result; })
+#else
+#define PROBE_WINDOW_CALL(id, hwnd, api, call) (call)
+#endif
+
 /***********************************************************************
  *           create_window_handle
  *
  * Create a window handle with the server.
  */
 static WND *create_window_handle( HWND parent, HWND owner, UNICODE_STRING *name, HINSTANCE class_instance,
-                                  const CREATESTRUCTW *cs, BOOL ansi, DWORD style, DWORD ex_style )
+                                  const CREATESTRUCTW *cs, BOOL ansi, DWORD style, DWORD ex_style, unsigned int probe_id )
 {
     struct ratio dpi = { system_dpi, 1 }, raw_dpi = { system_dpi, 1 };
     RECT rect = { cs->x, cs->y, cs->x + cs->cx, cs->y + cs->cy };
@@ -5793,7 +5859,7 @@ static WND *create_window_handle( HWND parent, HWND owner, UNICODE_STRING *name,
         req->atom            = wine_server_add_atom( req, name );
         req->dpi             = dpi;
         req->raw_dpi         = raw_dpi;
-        if (!wine_server_call_err( req ))
+        if (!PROBE_WINDOW_CALL( probe_id, NULL, "server:create_window", wine_server_call_err( req ) ))
         {
             handle      = wine_server_ptr_handle( reply->handle );
             full_parent = wine_server_ptr_handle( reply->parent );
@@ -5933,11 +5999,11 @@ static void map_dpi_create_struct( CREATESTRUCTW *cs, struct ratio dpi_to )
 /***********************************************************************
  *           NtUserCreateWindowEx (win32u.@)
  */
-HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
+static HWND create_window_ex( DWORD ex_style, UNICODE_STRING *class_name,
                                   UNICODE_STRING *version, UNICODE_STRING *window_name,
                                   DWORD style, INT x, INT y, INT cx, INT cy,
                                   HWND parent, HMENU menu, HINSTANCE class_instance, void *params,
-                                  DWORD flags, HINSTANCE instance, const WCHAR *class, BOOL ansi )
+                                  DWORD flags, HINSTANCE instance, const WCHAR *class, BOOL ansi, unsigned int probe_id )
 {
     WCHAR base_nameW[MAX_ATOM_LEN + 1];
     struct ratio win_dpi;
@@ -6012,7 +6078,7 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     style = cs.style & ~WS_VISIBLE;
     ex_style = cs.dwExStyle & ~WS_EX_LAYERED;
     if (!(win = create_window_handle( parent, owner, class_name, class_instance,
-                                      &cs, ansi, style, ex_style )))
+                                      &cs, ansi, style, ex_style, probe_id )))
         return 0;
     hwnd = win->handle;
 
@@ -6053,7 +6119,8 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
 
     cbtc.hwndInsertAfter = HWND_TOP;
     cbtc.lpcs = &cs;
-    if (call_hooks( WH_CBT, HCBT_CREATEWND, (WPARAM)hwnd, (LPARAM)&cbtc, sizeof(cbtc) ))
+    if (PROBE_WINDOW_CALL( probe_id, hwnd, "WH_CBT:HCBT_CREATEWND",
+                           call_hooks( WH_CBT, HCBT_CREATEWND, (WPARAM)hwnd, (LPARAM)&cbtc, sizeof(cbtc) ) ))
     {
         free_window_handle( hwnd );
         return 0;
@@ -6129,7 +6196,8 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     new_rects.client = new_rects.window;
 
     surface = get_window_surface( hwnd, SWP_NOZORDER | SWP_NOACTIVATE, FALSE, &new_rects, &surface_rect );
-    if (!apply_window_pos( hwnd, 0, SWP_NOZORDER | SWP_NOACTIVATE, surface, &new_rects, NULL ))
+    if (!PROBE_WINDOW_CALL( probe_id, hwnd, "apply_window_pos",
+                           apply_window_pos( hwnd, 0, SWP_NOZORDER | SWP_NOACTIVATE, surface, &new_rects, NULL ) ))
     {
         if (surface) window_surface_release( surface );
         goto failed;
@@ -6139,7 +6207,8 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     /* send WM_NCCREATE */
 
     TRACE( "hwnd %p cs %d,%d %dx%d %s\n", hwnd, cs.x, cs.y, cs.cx, cs.cy, debugstr_window_rects(&new_rects) );
-    if (!send_message_timeout( hwnd, WM_NCCREATE, 0, (LPARAM)&cs, SMTO_NORMAL, 0, ansi ))
+    if (!PROBE_WINDOW_CALL( probe_id, hwnd, "WM_NCCREATE",
+                           send_message_timeout( hwnd, WM_NCCREATE, 0, (LPARAM)&cs, SMTO_NORMAL, 0, ansi ) ))
     {
         WARN( "%p: aborted by WM_NCCREATE\n", hwnd );
         goto failed;
@@ -6164,7 +6233,8 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
 
         /* the rectangle is in screen coords for WM_NCCALCSIZE when wparam is FALSE */
         map_window_points( parent, 0, (POINT *)&new_rects.client, 2, win_dpi );
-        send_message( hwnd, WM_NCCALCSIZE, FALSE, (LPARAM)&new_rects.client );
+        PROBE_WINDOW_CALL( probe_id, hwnd, "WM_NCCALCSIZE",
+                           send_message( hwnd, WM_NCCALCSIZE, FALSE, (LPARAM)&new_rects.client ) );
         map_window_points( 0, parent, (POINT *)&new_rects.client, 2, win_dpi );
 
         surface = get_window_surface( hwnd, SWP_NOACTIVATE, FALSE, &new_rects, &surface_rect );
@@ -6174,12 +6244,14 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     else goto failed;
 
     /* send WM_CREATE */
-    if (send_message_timeout( hwnd, WM_CREATE, 0, (LPARAM)&cs, SMTO_NORMAL, 0, ansi ) == -1)
+    if (PROBE_WINDOW_CALL( probe_id, hwnd, "WM_CREATE",
+                           send_message_timeout( hwnd, WM_CREATE, 0, (LPARAM)&cs, SMTO_NORMAL, 0, ansi ) ) == -1)
         goto failed;
 
     /* call the driver */
 
-    if (!user_driver->pCreateWindow( hwnd )) goto failed;
+    if (!PROBE_WINDOW_CALL( probe_id, hwnd, "driver:pCreateWindow",
+                           user_driver->pCreateWindow( hwnd ) )) goto failed;
 
     NtUserNotifyWinEvent( EVENT_OBJECT_CREATE, hwnd, OBJID_WINDOW, 0 );
 
@@ -6228,7 +6300,8 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
         else if (cs.style & WS_MINIMIZE)
             sw = SW_SHOWMINIMIZED;
 
-        NtUserShowWindow( hwnd, sw );
+        PROBE_WINDOW_CALL( probe_id, hwnd, "NtUserShowWindow",
+                           NtUserShowWindow( hwnd, sw ) );
         if (cs.dwExStyle & WS_EX_MDICHILD)
         {
             send_message( cs.hwndParent, WM_MDIREFRESHMENU, 0, 0 );
@@ -6255,6 +6328,33 @@ failed:
     set_thread_dpi_awareness_context( context );
     return 0;
 }
+
+HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
+                                  UNICODE_STRING *version, UNICODE_STRING *window_name,
+                                  DWORD style, INT x, INT y, INT cx, INT cy,
+                                  HWND parent, HMENU menu, HINSTANCE class_instance, void *params,
+                                  DWORD flags, HINSTANCE instance, const WCHAR *class, BOOL ansi )
+{
+    unsigned int probe_id = 0;
+    HWND hwnd;
+
+#ifdef __SWITCH__
+    probe_id = probe_window_begin( class_name, parent, style, ex_style, cx, cy );
+#endif
+    hwnd = create_window_ex( ex_style, class_name, version, window_name, style, x, y, cx, cy,
+                             parent, menu, class_instance, params, flags, instance, class, ansi, probe_id );
+#ifdef __SWITCH__
+    if (probe_id)
+    {
+        probe_window_step( probe_id, hwnd, "NtUserCreateWindowEx", TRUE, (ULONG_PTR)hwnd );
+        if (hwnd && !parent && cx == 720 && cy == 420 && wine_nx_probe_set_window_phase)
+            wine_nx_probe_set_window_phase( 2 );
+    }
+#endif
+    return hwnd;
+}
+
+#undef PROBE_WINDOW_CALL
 
 static void *get_dialog_info( HWND hwnd )
 {

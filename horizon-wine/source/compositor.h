@@ -51,6 +51,8 @@ void wine_nx_layer_update( struct wine_nx_layer *layer, const uint32_t *pixels, 
                            int left, int top, int right, int bottom );
 /* Show the layer's top-left width by height pixels with their corner at x, y on
  * the screen; a width or height of 0 hides it. */
+int wine_nx_startup_layer_visible( struct wine_nx_layer *layer );
+void wine_nx_layer_place_startup( struct wine_nx_layer *layer, int x, int y );
 void wine_nx_layer_place( struct wine_nx_layer *layer, int x, int y, int width, int height );
 /* The stacking order, topmost first. Layers left out go below all of these. */
 void wine_nx_compositor_restack( struct wine_nx_layer **layers, int count );

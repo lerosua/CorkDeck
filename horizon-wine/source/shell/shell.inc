@@ -3611,6 +3611,38 @@ static void sh_item_menu( struct launcher *l, int item )
     sh_rebuild( l, item );
 }
 
+/* The runtime may relaunch through winedbg before the shell can show the
+ * original game's error. Match its saved session, not the newest log file. */
+static void sh_show_launch_failure( struct launcher *l )
+{
+    char path[512], text[512];
+    unsigned int id;
+    long long start;
+    runtime_file( l, "corkdeck/launch-failure.txt", path, sizeof(path) );
+    FILE *file = fopen( path, "rb" );
+    if (!file) return;
+    int valid = fscanf( file, "%u %lld", &id, &start ) == 2;
+    fclose( file );
+    if (valid)
+    {
+        struct app_session sessions[20];
+        int count = app_record_sessions( l->options->runtime_dir, id, sessions, 20 );
+        for (int i = 0; i < count; ++i)
+        {
+            if (sessions[i].start != start) continue;
+            const char *title = "";
+            for (int j = 0; j < l->program_count; ++j)
+                if (l->programs[j].catalog_id == id) { title = l->programs[j].title; break; }
+            snprintf( text, sizeof(text), "%s\n%s\n%s 0x%08x", title, sessions[i].note,
+                      sh_tr( "Exit code" ), sessions[i].exit_code );
+            ui_message( &l->ui, sh_tr( "Startup error" ), text );
+            ui_start_screen( &l->ui );
+            break;
+        }
+    }
+    remove( path );
+}
+
 static int shell_run( struct launcher *l, char *target, size_t size )
 {
     struct ui *ui = &l->ui;
@@ -3627,6 +3659,7 @@ static int shell_run( struct launcher *l, char *target, size_t size )
     ui->global_data = l;
     sh.zone = 1;
     sh.sort = SORT_RECENT;
+    sh_show_launch_failure( l );
     sh_card_probe( l, "start" );
     {
         /* Builds 0.1.8b to 0.2b could give a program an overclocking profile, written into

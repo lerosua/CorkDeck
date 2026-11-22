@@ -45,10 +45,13 @@
 #include "app/app_version.h"
 #include "pointer_cursor.h"
 #include "compositor.h"
+#include "startup_panel.h"
+#include "system_language.h"
 #include "shader_ram_cache.h"
 #include "osk.h"
 #include "std_stream_lines.h"
 #include "thread_profile.h"
+#include "electron_probe.h"
 #include "performance.h"
 #include "dxvk_releases.h"
 #include "horizon_dlls.h"
@@ -201,7 +204,7 @@ static int log_flusher_running;
 static int log_line_is_urgent( const char *line )
 {
     return !strncmp( line, "[NETDIAG]", 9 ) || !strncmp( line, "[EXC]", 5 ) || !strncmp( line, "[EXIT]", 6 ) ||
-           !strncmp( line, "[FAIL]", 6 ) || !strncmp( line, "[PE32 TEST]", 11 ) ||
+           !strncmp( line, "[EPROBE]", 8 ) || !strncmp( line, "[FAIL]", 6 ) || !strncmp( line, "[HABL]", 6 ) || !strncmp( line, "[MOJO]", 6 ) || !strncmp( line, "[PE32 TEST]", 11 ) ||
            !strncmp( line, "[LIFECYCLE] final", 17 ) || !strncmp( line, "[LIFECYCLE] verdict", 19 );
 }
 
@@ -212,6 +215,7 @@ static int runtime_log_failures_only;
 static int log_line_is_kept( const char *line )
 {
     return !runtime_log_failures_only || log_line_is_urgent( line ) ||
+           (!strncmp( line, "[STARTUP] stage=", sizeof("[STARTUP] stage=") - 1 ) && !strstr( line, " total_s=" )) ||
            !strncmp( line, "[BUILD]", 7 ) || !strncmp( line, "[BLOCK]", 7 ) || !strncmp( line, "[VAFAIL]", 8 );
 }
 
@@ -303,6 +307,24 @@ enum startup_stage { STARTUP_PREPARE = 1, STARTUP_TRANSLATOR, STARTUP_DLLS,
 static int startup_stage;
 static u64 startup_started, startup_changed;
 static char startup_name[128];
+static int startup_language, startup_visible;
+static pthread_mutex_t startup_note_lock = PTHREAD_MUTEX_INITIALIZER;
+static char startup_note[APP_SESSION_NOTE];
+static int habl_diagnostics, habl_fatal_seen, habl_exception_seen[2];
+static unsigned int habl_children, habl_child_returns, habl_reads, habl_writes;
+
+static int electron_probe;
+
+int wine_nx_electron_probe_active(void)
+{
+    return __atomic_load_n( &electron_probe, __ATOMIC_ACQUIRE );
+}
+
+int wine_nx_habl_diagnostics(void)
+{
+    return __atomic_load_n( &habl_diagnostics, __ATOMIC_ACQUIRE );
+}
+static int startup_refresh_panel( void );
 static void startup_set( enum startup_stage stage );
 static void startup_poll( void );
 static int startup_snapshot( FILE *file );
@@ -347,6 +369,7 @@ static void *log_flusher( void *arg )
     {
         svcSleepThread( 200000000LL );
         runtime_tick_std_streams();
+        if (__atomic_load_n( &startup_visible, __ATOMIC_ACQUIRE )) startup_refresh_panel();
         if (++ticks % 25 == 0)
         {
 #ifdef WINE_NX_SWAP_POC
@@ -459,6 +482,29 @@ static int log_lock_bounded( void )
     return 0;
 }
 
+/* Keep the first actionable failure even when the rotating runtime log later
+ * belongs to Wine's debugger. Never take a graphics lock on a logging thread. */
+static void startup_capture_error( const char *line )
+{
+    char note[APP_SESSION_NOTE];
+    if (!strncmp( line, "[MOJO] ", 7 ) && strstr( line, " reason=duplex_not_supported " ) &&
+        strstr( line, " mapped_win32_error=0x57" ))
+    {
+        snprintf( note, sizeof(note), "CreateNamedPipeW  0x57 / 0xC000000D  (%s)",
+                  startup_language == APP_LANG_ZH_CN ? "双向管道被拒绝" : "duplex pipe rejected" );
+    }
+    else if (!strncmp( line, "[HABL] first_fatal ", sizeof("[HABL] first_fatal ") - 1 ))
+        snprintf( note, sizeof(note), "%.*s", (int)sizeof(note) - 1, line + sizeof("[HABL] first_fatal ") - 1 );
+    else if (!strncmp( line, "[FAIL] ", 7 ) || !strncmp( line, "[BLOCK] ", 8 ) ||
+             !strncmp( line, "[EXC] unhandled ", 16 ))
+        snprintf( note, sizeof(note), "%.*s", (int)sizeof(note) - 1, strchr( line, ' ' ) + 1 );
+    else return;
+    note[strcspn( note, "\r\n\t" )] = 0;
+    pthread_mutex_lock( &startup_note_lock );
+    if (!startup_note[0]) snprintf( startup_note, sizeof(startup_note), "%s", note );
+    pthread_mutex_unlock( &startup_note_lock );
+}
+
 static void log_line( const char *fmt, ... )
 {
     /* The software console aborts the process (framebufferBegin →
@@ -478,6 +524,7 @@ static void log_line( const char *fmt, ... )
     if (len > (int)sizeof(line) - 2) len = sizeof(line) - 2;
     line[len++] = '\n';
     line[len] = 0;
+    if (__atomic_load_n( &game_diagnostics_active, __ATOMIC_ACQUIRE )) startup_capture_error( line );
     {
         int expected = 0, fault = wine_nx_fault_kind( line );
         if (fault && __atomic_compare_exchange_n( &runtime_fault_kind, &expected, fault, 0,
@@ -528,12 +575,6 @@ static void open_game_log( const char *target )
     if (!log_file) return;
     base = base ? base + 1 : target;
     if (!base[0]) return;
-    snprintf( startup_name, sizeof(startup_name), "%s", base );
-    __atomic_store_n( &runtime_fault_kind, 0, __ATOMIC_RELEASE );
-    __atomic_store_n( &runtime_fault_tick, 0, __ATOMIC_RELEASE );
-    __atomic_store_n( &startup_started, armGetSystemTick(), __ATOMIC_RELEASE );
-    __atomic_store_n( &game_diagnostics_active, 1, __ATOMIC_RELEASE );
-    startup_set( STARTUP_PREPARE );
     for (i = 0; base[i] && i < sizeof(name) - 1; i++)
     {
         char c = base[i];
@@ -558,7 +599,7 @@ static void open_game_log( const char *target )
     if ((game_log_file = fopen( path, "w" )))
     {
         /* What was said before this point, so the file stands on its own. */
-        if ((sofar = fopen( RUNTIME_LOGS "/autorun_runtime.log", "r" )))
+        if (!runtime_log_failures_only && (sofar = fopen( RUNTIME_LOGS "/autorun_runtime.log", "r" )))
         {
             char chunk[4096];
             size_t got;
@@ -584,6 +625,24 @@ static const char *startup_label( int stage )
     case STARTUP_PRESENTED: return "Graphics API reports successful presentation";
     default: return "Preparing runtime";
     }
+}
+
+static int startup_refresh_panel( void )
+{
+    static const char *const zh[] = {"", "正在准备运行环境", "正在准备 CPU 转译器",
+        "正在加载 Wine 和 Windows DLL", "正在启动程序和初始化 DLL", "正在初始化图形，等待首帧", "已显示首帧"};
+    static const char *const ru[] = {"", "Подготовка среды", "Подготовка транслятора",
+        "Загрузка Wine и DLL Windows", "Запуск программы", "Ожидание первого кадра", "Первый кадр показан"};
+    int stage = __atomic_load_n( &startup_stage, __ATOMIC_ACQUIRE );
+    if (stage < STARTUP_PREPARE || stage > STARTUP_PRESENTED) return 0;
+    char note[APP_SESSION_NOTE];
+    pthread_mutex_lock( &startup_note_lock );
+    memcpy( note, startup_note, sizeof(note) );
+    pthread_mutex_unlock( &startup_note_lock );
+    int visible = startup_panel_draw( startup_language == APP_LANG_ZH_CN ? zh[stage] :
+                        startup_language == APP_LANG_RU ? ru[stage] : startup_label( stage ), note );
+    if (!visible) __atomic_store_n( &startup_visible, 0, __ATOMIC_RELEASE );
+    return visible && note[0];
 }
 
 static void startup_set( enum startup_stage stage )
@@ -713,7 +772,7 @@ static void stall_watch( void *arg )
         /* Five seconds, in slices, so quitting does not wait for them. */
         for (i = 0; i < 50 && !__atomic_load_n( (int *)&stall_watch_quit, __ATOMIC_RELAXED ); i++)
             svcSleepThread( 100000000LL );
-        if (!__atomic_load_n( &game_diagnostics_active, __ATOMIC_ACQUIRE ))
+        if (!__atomic_load_n( &game_diagnostics_active, __ATOMIC_ACQUIRE ) || runtime_log_failures_only)
         {
             quiet = reported = 0;
             last_frames = ~0u;
@@ -738,8 +797,100 @@ static void stall_watch( void *arg )
 }
 
 
+static void habl_capture_fatal( const char *source, const char *line )
+{
+    if ((strstr( line, ":FATAL:" ) || strstr( line, ":FATAL]" ) || strstr( line, "Check failed:" )) &&
+        !__atomic_exchange_n( &habl_fatal_seen, 1, __ATOMIC_ACQ_REL ))
+        log_line( "[HABL] first_fatal source=%s %s", source, line );
+}
+
+static int habl_claim_exception( unsigned int code, int first_chance )
+{
+    if (code == DBG_PRINTEXCEPTION_C || code == DBG_PRINTEXCEPTION_WIDE_C ||
+        code == 0x406d1388 /* thread name */) return 0;
+    return !__atomic_exchange_n( &habl_exception_seen[!!first_chance], 1, __ATOMIC_ACQ_REL );
+}
+
+void wine_nx_habl_exception( unsigned int code, unsigned int flags, const void *address,
+                             unsigned int tid, int first_chance )
+{
+    if (wine_nx_habl_diagnostics() && habl_claim_exception( code, first_chance ))
+        log_line( "[HABL] windows_exception chance=%s tid=%x code=0x%08x flags=%#x address=%p",
+                  first_chance ? "first" : "last", tid, code, flags, address );
+}
+
 void wine_nx_runtime_trace( const char *msg )
 {
+    /* Already formatted by the probe. Its payload may itself contain Wine SEH text. */
+    if (!strncmp( msg, "[EPROBE]", 8 ))
+    {
+        log_line( "%s", msg );
+        return;
+    }
+    if (wine_nx_habl_diagnostics())
+    {
+        const char *seh = strstr( msg, ":seh:" );
+        if (!strncmp( msg, "[HABL] child_start ", 19 ))
+            __atomic_add_fetch( &habl_children, 1, __ATOMIC_RELAXED );
+        else if (!strncmp( msg, "[HABL] child_result ", 20 ))
+            __atomic_add_fetch( &habl_child_returns, 1, __ATOMIC_RELAXED );
+        else if (!strncmp( msg, "[MOJO] api=Nt", 13 ) && strstr( msg, " first_io=1 phase=begin " ))
+        {
+            if (!strncmp( msg + 13, "ReadFile ", 9 )) __atomic_add_fetch( &habl_reads, 1, __ATOMIC_RELAXED );
+            else if (!strncmp( msg + 13, "WriteFile ", 10 )) __atomic_add_fetch( &habl_writes, 1, __ATOMIC_RELAXED );
+        }
+        if (wine_nx_electron_probe_active())
+        {
+            const char *entry = strstr( msg, ":process:CreateProcessInternalW " );
+            if (strstr( msg, ":dwrite:" ) || strstr( msg, ":dwrite_file:" ))
+            {
+                if (strstr( msg, ":fontcollection_add_replacement " ) ||
+                    strstr( msg, ":dwritefontcollection_FindFamilyName " ) ||
+                    strstr( msg, ":dwritefontfamily_GetFirstMatchingFont " ) ||
+                    strstr( msg, "resolved family " ) || strstr( msg, "returning cached fontface" ) ||
+                    strstr( msg, "warn:dwrite" ) || strstr( msg, "err:dwrite" ))
+                    log_line( "[EPROBE] font %s", msg );
+                return;
+            }
+            if (seh)
+            {
+                wine_nx_probe_seh( msg );
+                if (strstr( seh, ":seh:OutputDebugString" ) || strstr( seh, ":seh:RaiseFailFastException " ))
+                    wine_nx_probe_message( "wine-debug", msg );
+            }
+            if (entry)
+            {
+                const char *args = entry + sizeof(":process:CreateProcessInternalW ") - 1;
+                if (!strncmp( args, "app ", 4 ))
+                    log_line( "[EPROBE] api=CreateProcessInternalW phase=enter tid=%u", (unsigned int)GetCurrentThreadId() );
+                else if (!strncmp( args, "started process pid ", 20 ))
+                    log_line( "[EPROBE] api=CreateProcessInternalW %s", args );
+                return;
+            }
+            if (strstr( msg, ":process:" )) return; /* Other process traces may include the full command line. */
+            if (!strncmp( msg, "[HABL] child_", 13 ))
+            {
+                log_line( "[EPROBE]%s", msg + 6 );
+                return;
+            }
+        }
+        if (seh)
+        {
+            /* The PE DLL can dispatch entirely in user mode before any NT
+             * exception syscall. Wine emits this record before calling VEH. */
+            static const char dispatch[] = ":seh:dispatch_exception code=";
+            if (!strncmp( seh, dispatch, sizeof(dispatch) - 1 ))
+            {
+                unsigned int code = strtoul( seh + sizeof(dispatch) - 1, NULL, 16 );
+                if (habl_claim_exception( code, 1 ))
+                    log_line( "[HABL] windows_exception chance=first %s", msg );
+            }
+            if (strstr( seh, "OutputDebugString" ) || strstr( seh, "dispatch_exception" ))
+                habl_capture_fatal( "wine-debug", msg );
+            /* The exception trace also prints registers and unwind steps. */
+            if (runtime_log_failures_only) return;
+        }
+    }
     log_line( "%s", msg );
 }
 
@@ -1587,6 +1738,17 @@ static void std_stream_log( void *ctx, const char *line )
 {
     struct std_stream *stream = ctx;
 
+    if (wine_nx_electron_probe_active() && stream == &std_streams[0] &&
+        !strncmp( line, "{\"run\":", 7 ) && strstr( line, "\"event\":" ))
+    {
+        if (strstr( line, "\"event\":\"window-create-started\"" )) wine_nx_probe_set_window_phase( 1 );
+        log_line( "[EPROBE] js %s", line );
+        if (strstr( line, "\"event\":\"window-created\"" )) wine_nx_probe_set_window_phase( 0 );
+        return;
+    }
+    if (wine_nx_electron_probe_active() && stream == &std_streams[1])
+        wine_nx_probe_message( stream->tag, line );
+    if (wine_nx_habl_diagnostics()) habl_capture_fatal( stream->tag, line );
     if (stream->lines.lines < STD_STREAM_LOG_LINES) log_line( "[%s] %s", stream->tag, line );
     else if (stream->lines.lines == STD_STREAM_LOG_LINES)
         log_line( "[%s] (further output only in %s)", stream->tag, stream->path );
@@ -1636,6 +1798,15 @@ void wine_nx_runtime_dump_std_streams(void)
                   rc ? (unsigned int)fsdevGetLastResult() : 0, horizon_stat_open_file( stream->path, &st ) );
     }
     pthread_mutex_unlock( &std_stream_mutex );
+    if (wine_nx_habl_diagnostics())
+        log_line( "[HABL] exit_summary fatal=%d first_chance=%d last_chance=%d mojo_read_endpoints=%u "
+                  "mojo_write_endpoints=%u child_requests=%u child_returns=%u",
+                  __atomic_load_n( &habl_fatal_seen, __ATOMIC_RELAXED ),
+                  __atomic_load_n( &habl_exception_seen[1], __ATOMIC_RELAXED ),
+                  __atomic_load_n( &habl_exception_seen[0], __ATOMIC_RELAXED ),
+                  __atomic_load_n( &habl_reads, __ATOMIC_RELAXED ), __atomic_load_n( &habl_writes, __ATOMIC_RELAXED ),
+                  __atomic_load_n( &habl_children, __ATOMIC_RELAXED ), __atomic_load_n( &habl_child_returns, __ATOMIC_RELAXED ) );
+
 }
 
 /* Present only in runtimes linked with the Box64 interpreter. */
@@ -2249,6 +2420,8 @@ static const char runtime_environment[] =
     "DXVK_ASYNC=1\0"
     "DXVK_CONFIG_FILE=C:\\users\\steamuser\\AppData\\Local\\Autorun\\dxvk.conf\0"
     "DXVK_HUD=0\0"
+    "ELECTRON_ENABLE_LOGGING=1\0"
+    "ELECTRON_ENABLE_STACK_DUMPING=1\0"
     "HOMEDRIVE=C:\0"
     "HOMEPATH=\\users\\steamuser\0"
     "LOCALAPPDATA=C:\\users\\steamuser\\AppData\\Local\0"
@@ -2486,6 +2659,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     {
         const char *value = entry;
 
+        if (!strncmp( entry, "ELECTRON_", 9 ) && !wine_nx_electron_probe_active()) continue;
         if (runtime_d3d == LAUNCHER_D3D_WINE && !strncmp( entry, "DXVK_", 5 )) continue;
         if (!strncmp( entry, "DXVK_ASYNC=", 11 ) &&
             (runtime_dxvk_source != DXVK_SOURCE_GPLASYNC || !dxvk.installed)) continue;
@@ -4197,7 +4371,11 @@ static int return_to_launcher( void )
 
     lan_log_stop(); /* Join diagnostics before runtime teardown and loader restart. */
     wine_nx_perf_stop();
+    int showing_error = __atomic_load_n( &startup_visible, __ATOMIC_ACQUIRE ) && startup_refresh_panel();
     session_finish();
+    if (showing_error) svcSleepThread( 1500000000LL );
+    __atomic_store_n( &startup_visible, 0, __ATOMIC_RELEASE );
+    startup_panel_close();
 
     /* Only reached with the program's threads already gone. Both of these wait
      * for the thread they end: a thread of the runtime's own has no quit point
@@ -4453,7 +4631,7 @@ static void session_finish( void )
     unsigned int i, count = __atomic_load_n( &session_image_count, __ATOMIC_RELAXED );
     FILE *file;
 
-    if (!session_start || runtime_log_failures_only) return;
+    if (!session_start || (!session_app && runtime_log_failures_only)) return;
     if (count > ARRAY_SIZE(session_images)) count = ARRAY_SIZE(session_images);
     if (count)
     {
@@ -4461,7 +4639,7 @@ static void session_finish( void )
         if ((slash = strrchr( program_dir, '\\' ))) slash[1] = 0;
     }
     mkdir( RUNTIME_DIR "/corkdeck", 0777 );
-    if ((file = fopen( RUNTIME_DIR "/corkdeck/last-modules.txt", "w" )))
+    if (!runtime_log_failures_only && (file = fopen( RUNTIME_DIR "/corkdeck/last-modules.txt", "w" )))
     {
         for (i = 0; i < count; i++)
             fprintf( file, "%s\n    %s, %llu KB\n", session_images[i].name,
@@ -4477,8 +4655,20 @@ static void session_finish( void )
               __atomic_load_n( &runtime_fault_kind, __ATOMIC_ACQUIRE ) ? "stopped by a fault (see the log)"
               : wine_nx_program_exit_code == ~0u ? "closed from outside"
               : session.frames ? "closed by the application" : "ended without showing a frame" );
+    char note[APP_SESSION_NOTE];
+    pthread_mutex_lock( &startup_note_lock );
+    memcpy( note, startup_note, sizeof(note) );
+    pthread_mutex_unlock( &startup_note_lock );
+    if (note[0]) snprintf( session.note, sizeof(session.note), "%s", note );
     if (!app_record_add_session( RUNTIME_DIR, session_app, &session ))
-        log_line( "[SESSION] could not write the session of entry %u", session_app );
+        log_line( "[FAIL] could not write the session of entry %u", session_app );
+    else if (!session.frames && (note[0] || (session.exit_code >= 0x80000000u && session.exit_code != ~0u)))
+    {
+        char ticket[80];
+        snprintf( ticket, sizeof(ticket), "%u %lld", session_app, session.start );
+        if (!write_line( RUNTIME_DIR "/corkdeck/launch-failure.txt", ticket ))
+            log_line( "[FAIL] could not save launcher notification for entry %u", session_app );
+    }
     session_start = 0;
 }
 
@@ -4714,6 +4904,8 @@ static void runtime_resolve_settings( const char *target, USHORT machine )
     }
     /* Whose session this is: the entry of the library the program was started as. */
     session_app = target[1] != ':' ? runtime_catalog_id( settings_owner( target ) ) : 0;
+    /* A chained debugger inherits the game settings but is a separate process. */
+    if (chain_owner[0] && !strcasecmp( target, WINE_SYSTEM_DIR "/winedbg.exe" )) session_app = 0;
     session_start = (long long)time( NULL );
     __atomic_store_n( &session_image_count, 0, __ATOMIC_RELAXED );
     session_log_dir[0] = 0;
@@ -5270,14 +5462,39 @@ int main( int argc, char **argv )
     remote_snapshot_enabled = app_settings_get( &runtime_settings, APP_SET_REMOTE_SNAPSHOT ) > 0;
     if (!app_settings_get( &runtime_settings, APP_SET_DIAGNOSTICS_MODE ))
     {
-        log_line( "[BUILD] diagnostics are switched off: from here only failures are written" );
+        log_line( "[BUILD] diagnostics are switched off: keeping startup stages and failures" );
         lan_log_stop();
         runtime_log_failures_only = 1;
     }
     horizon_server_profile_enabled = runtime_profile;
-    game_log_session_dir = session_log_dir;
+    game_log_session_dir = runtime_log_failures_only ? NULL : session_log_dir;
     game_log_session_start = session_start;
-    if (!runtime_log_failures_only) open_game_log( target );
+    const char *base = strrchr( target, '/' );
+    __atomic_store_n( &electron_probe, !strcasecmp( base ? base + 1 : target, "ElectronProbe.exe" ), __ATOMIC_RELEASE );
+    if (session_app || !runtime_log_failures_only || wine_nx_electron_probe_active())
+    {
+        const char *language = app_setting_def( APP_SET_LANGUAGE )->choices[app_settings_get( &runtime_settings, APP_SET_LANGUAGE )].value;
+        if (!strcmp( language, "system" )) language = nx_system_language().console;
+        startup_language = !strncmp( language, "zh", 2 ) ? APP_LANG_ZH_CN : !strcmp( language, "ru" ) ? APP_LANG_RU : APP_LANG_EN;
+        snprintf( startup_name, sizeof(startup_name), "%s", base ? base + 1 : target );
+        __atomic_store_n( &runtime_fault_kind, 0, __ATOMIC_RELEASE );
+        __atomic_store_n( &runtime_fault_tick, 0, __ATOMIC_RELEASE );
+        __atomic_store_n( &startup_started, armGetSystemTick(), __ATOMIC_RELEASE );
+        __atomic_store_n( &game_diagnostics_active, 1, __ATOMIC_RELEASE );
+        __atomic_store_n( &habl_diagnostics, !strcasecmp( startup_name, "habl.exe" ) || wine_nx_electron_probe_active(), __ATOMIC_RELEASE );
+        open_game_log( target );
+        if (wine_nx_electron_probe_active())
+            log_line( "[EPROBE] enabled js/native_window/child_process/mojo_io/windows_exception/chromium_logging/preexit_stack/font" );
+        else if (wine_nx_habl_diagnostics())
+            log_line( "[HABL] enabled fatal/windows_exception/mojo_io/child_process" );
+        startup_set( STARTUP_PREPARE );
+        if (session_app && wine_nx_compositor_enabled())
+        {
+            startup_panel_open( startup_name );
+            __atomic_store_n( &startup_visible, 1, __ATOMIC_RELEASE );
+            startup_refresh_panel();
+        }
+    }
     wine_nx_perf_start( app_settings_get( &runtime_settings, APP_SET_PERF_COUNTERS ) > 0 ? NX_PERF_CONTINUOUS : 0 );
     log_line( "wine-nx-runtime: generic Wine ntdll PE loader path" );
     log_line( "[BUILD] %s", WINE_NX_RUNTIME_BUILD );
@@ -5425,14 +5642,22 @@ int main( int argc, char **argv )
         struct __wine_debug_channel *options = (void *)((char *)teb->Peb + 2 * page_size);
         /* In the order of their names. seh: every exception a program raises, with its
          * code and address -- what a program that catches its own fault and leaves says nothing of. */
-        static const char channels[][15] = { "iphlpapi", "secur32", "seh", "winsock" };
+        static const char channels[][15] = { "dwrite", "dwrite_file", "iphlpapi", "process", "secur32", "seh", "winsock" };
         unsigned int i = 0;
 
-        for (; wine_nx_runtime_verbose && i < ARRAY_SIZE(channels); i++)
+        for (unsigned int j = 0; j < ARRAY_SIZE(channels); ++j)
         {
-            memcpy( options[i].name, channels[i], sizeof(channels[i]) );
+            if (!strncmp( channels[j], "dwrite", 6 ) || !strcmp( channels[j], "process" ))
+            {
+                if (!wine_nx_electron_probe_active()) continue;
+            }
+            else if (!wine_nx_runtime_verbose && !(wine_nx_habl_diagnostics() && !strcmp( channels[j], "seh" ))) continue;
+            memcpy( options[i].name, channels[j], sizeof(channels[j]) );
             options[i].flags = (1 << __WINE_DBCL_ERR) | (1 << __WINE_DBCL_WARN) |
-                               (1 << __WINE_DBCL_FIXME) | (1 << __WINE_DBCL_TRACE);
+                               (1 << __WINE_DBCL_FIXME);
+            /* The fragment channel traces every table read. Its warnings report failed opens. */
+            if (strcmp( channels[j], "dwrite_file" )) options[i].flags |= 1 << __WINE_DBCL_TRACE;
+            i++;
         }
         options[i].name[0] = 0;
         /* Wine reports a good deal at warning level and returns quietly after

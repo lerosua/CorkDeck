@@ -262,12 +262,21 @@ int main(void)
     }
     check( "running", wine_nx_compositor_running() );
 
+    struct wine_nx_layer *startup = wine_nx_layer_create(96, 96);
+    wine_nx_layer_place_startup( startup, 16, 16 );
+    fill_layer( startup, 96, 96, 0x00abc123 );
+    wait_pixel( "startup progress before any guest pixels", 30, 30, 0xabc123 );
+
     /* A placed layer shows; a later restack decides which covers which. */
     a = wine_nx_layer_create( 128, 128 );
     b = wine_nx_layer_create( 64, 64 );
     fill_layer( a, 128, 128, 0x00ff0000 );
     fill_layer( b, 64, 64, 0x0000ff00 );
     wine_nx_layer_place( a, 100, 100, 128, 128 );
+    wait_pixel( "guest frame retires startup progress", 30, 30, 0 );
+    fill_layer( startup, 96, 96, 0x00ffffff );
+    wait_pixel( "late progress does not cover the guest", 30, 30, 0 );
+    wine_nx_layer_destroy( startup );
     wait_pixel( "placed layer", 110, 110, 0xff0000 );
     wait_pixel( "unplaced layer stays hidden", 160, 160, 0xff0000 );
     wine_nx_layer_place( b, 150, 150, 64, 64 );

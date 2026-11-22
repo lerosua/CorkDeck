@@ -258,6 +258,15 @@ static const char *ntsyscall_names[] =
 static const char **syscall_names[4] = { ntsyscall_names };
 static const char **usercall_names;
 
+#ifdef __SWITCH__
+const char *wine_nx_syscall_name( unsigned int id )
+{
+    unsigned int table = (id >> 12) & 3, index = id & 0xfff;
+    if (!syscall_names[table] || index >= KeServiceDescriptorTable[table].ServiceLimit) return "unknown";
+    return syscall_names[table][index];
+}
+#endif
+
 void ntdll_add_syscall_debug_info( UINT idx, const char **names, const char **user_names )
 {
     syscall_names[idx] = names;

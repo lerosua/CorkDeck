@@ -12,6 +12,7 @@ static enum app_language shell_language_from_code( const char *code )
 static const char *const shell_strings[][APP_LANG_COUNT] =
 {
     /* The shell */
+    { "Startup error", "Ошибка запуска", "启动出错" },
     { "Restoring Steam session", "Steam · Восстановление сеанса", "正在恢复 Steam 会话" },
     { "Steam sign-in failed", "Steam · Ошибка входа", "Steam 登录失败" },
     { "Steam signed in", "Steam · В сети", "Steam 已登录" },

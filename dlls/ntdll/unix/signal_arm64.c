@@ -596,6 +596,9 @@ unsigned int wine_nx_syscalls;
 /* Calls per system call id (table << 12 | function), for the runtime's [PROGRESS] line. */
 unsigned int wine_nx_syscall_counts[0x2000];
 static __thread unsigned int wine_nx_syscall_sample;
+extern int wine_nx_probe_window_phase __attribute__((weak));
+extern void wine_nx_probe_sysret( unsigned int id, ULONG_PTR result ) __attribute__((weak));
+extern unsigned int wine_nx_probe_snapshot( const char *, unsigned int, ULONG_PTR ) __attribute__((weak));
 void *wine_nx_arm64ec_dispatch_ret;
 
 ULONG_PTR wine_nx_do_syscall( ULONG_PTR *stack_args,
@@ -638,6 +641,12 @@ ULONG_PTR wine_nx_do_syscall( ULONG_PTR *stack_args,
         __atomic_add_fetch( &wine_nx_syscall_counts[syscall_id & 0x1fff], 64, __ATOMIC_RELAXED );
     }
 
+    BOOL probe = &wine_nx_probe_window_phase && __atomic_load_n( &wine_nx_probe_window_phase, __ATOMIC_ACQUIRE );
+    if (probe && wine_nx_probe_snapshot && (void *)handler == (void *)NtTerminateProcess &&
+        (!x0 || (HANDLE)x0 == NtCurrentProcess()))
+        wine_nx_probe_snapshot( "self-terminate", (unsigned int)x1, (ULONG_PTR)stack_args );
+    if (probe && wine_nx_probe_snapshot && (void *)handler == (void *)NtRaiseHardError)
+        wine_nx_probe_snapshot( "NtRaiseHardError", (unsigned int)x0, (ULONG_PTR)stack_args );
     arg_bytes = table->ArgumentTable ? table->ArgumentTable[func_idx] : 0;
 
     if (trace_syscall)
@@ -686,6 +695,8 @@ ULONG_PTR wine_nx_do_syscall( ULONG_PTR *stack_args,
         result = ((syscall_func_16)handler)(x0,x1,x2,x3,x4,x5,x6,x7,
                                            a8,a9,a10,a11,a12,a13,a14,a15);
     }
+
+    if (probe && wine_nx_probe_sysret) wine_nx_probe_sysret( syscall_id, result );
 
     if (trace_syscall)
     {

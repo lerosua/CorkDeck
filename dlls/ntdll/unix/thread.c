@@ -1755,6 +1755,11 @@ NTSTATUS send_debug_event( struct thread_data *data, EXCEPTION_RECORD *rec,
         NtTerminateProcess( NtCurrentProcess(), rec->ExceptionCode );
     }
 
+#ifdef __SWITCH__
+    if (wine_nx_habl_exception && data->teb)
+        wine_nx_habl_exception( rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress,
+                                HandleToULong( data->teb->ClientId.UniqueThread ), first_chance );
+#endif
     if (!peb->BeingDebugged) return 0;  /* no debugger present */
 
     wine_pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );

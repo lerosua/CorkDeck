@@ -20,6 +20,7 @@ struct wine_nx_layer
     int x, y, visible_width, visible_height;
     int z;                                  /* drawn above the layers with a lower one */
     unsigned int stack_serial;              /* the restack that listed it */
+    int has_content;                       /* pixel update received, under comp.lock */
     int destroyed;                          /* freed by the presenter */
     /* Guarded by pixels_lock; pixels is NULL once destroyed. */
     pthread_mutex_t pixels_lock;
@@ -47,7 +48,7 @@ static struct
     int thread_ended;           /* the presenter has run its last instruction */
     int suspend;                /* an OpenGL program wants the screen */
     int suspended;              /* and the presenter has given it up */
-    struct wine_nx_layer *layers;
+    struct wine_nx_layer *layers, *startup;
     unsigned int stack_serial;
     int cursor_x, cursor_y, cursor_visible;
     unsigned int frames;
@@ -125,9 +126,18 @@ void wine_nx_layer_destroy( struct wine_nx_layer *layer )
 
     /* The texture can only go on the presenter thread, so it frees the rest. */
     pthread_mutex_lock( &comp.lock );
+    if (comp.startup == layer) comp.startup = NULL;
     layer->destroyed = 1;
     request_frame();
     pthread_mutex_unlock( &comp.lock );
+}
+
+static void hide_startup_locked( void )
+{
+    if (!comp.startup) return;
+    comp.startup->visible_width = comp.startup->visible_height = 0;
+    comp.startup = NULL;
+    request_frame();
 }
 
 void wine_nx_layer_update( struct wine_nx_layer *layer, const uint32_t *pixels, int stride,
@@ -168,6 +178,30 @@ void wine_nx_layer_update( struct wine_nx_layer *layer, const uint32_t *pixels, 
     pthread_mutex_unlock( &layer->pixels_lock );
 
     pthread_mutex_lock( &comp.lock );
+    layer->has_content = 1;
+    if (layer != comp.startup && layer->visible_width && layer->visible_height) hide_startup_locked();
+    request_frame();
+    pthread_mutex_unlock( &comp.lock );
+}
+
+int wine_nx_startup_layer_visible( struct wine_nx_layer *layer )
+{
+    pthread_mutex_lock( &comp.lock );
+    int visible = layer && comp.startup == layer;
+    pthread_mutex_unlock( &comp.lock );
+    return visible;
+}
+
+/* A startup card yields on the first visible guest window. Its updates must
+ * never bring it back over a running game. Direct GL/Vulkan suspend us. */
+void wine_nx_layer_place_startup( struct wine_nx_layer *layer, int x, int y )
+{
+    pthread_mutex_lock( &comp.lock );
+    comp.startup = layer;
+    layer->x = x;
+    layer->y = y;
+    layer->visible_width = layer->width;
+    layer->visible_height = layer->height;
     request_frame();
     pthread_mutex_unlock( &comp.lock );
 }
@@ -178,6 +212,7 @@ void wine_nx_layer_place( struct wine_nx_layer *layer, int x, int y, int width, 
     if (width < 0) width = 0;
     if (height < 0) height = 0;
     pthread_mutex_lock( &comp.lock );
+    if (layer != comp.startup && layer->has_content && width && height) hide_startup_locked();
     if (layer->x != x || layer->y != y || layer->visible_width != width || layer->visible_height != height)
     {
         layer->x = x;
@@ -260,6 +295,7 @@ void wine_nx_compositor_stop( void )
 void wine_nx_compositor_suspend( void )
 {
     pthread_mutex_lock( &comp.lock );
+    hide_startup_locked();
     comp.suspend = 1;
     pthread_cond_signal( &comp.wake );
     while (comp.state == STATE_STARTING || (comp.state == STATE_RUNNING && !comp.suspended))
@@ -481,6 +517,7 @@ static void *presenter_thread( void *arg )
                 drawn[count++] = keyboard;
             }
         }
+        int startup_frame = comp.startup != NULL;
         cursor_x = comp.cursor_x;
         cursor_y = comp.cursor_y;
         cursor_visible = comp.cursor_visible;
@@ -500,7 +537,7 @@ static void *presenter_thread( void *arg )
         backend->swap();
 
         pthread_mutex_lock( &comp.lock );
-        comp.frames++;
+        if (!startup_frame) comp.frames++;
     }
 
 stopped:
