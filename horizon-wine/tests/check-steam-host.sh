@@ -62,12 +62,18 @@ $cc $flags "$root/tests/steam_install_script_host.c" "$root/source/steam/steam_i
 "$build/install-script"
 $cc $flags -Wno-deprecated-declarations $(sdl2-config --cflags) "$root/tests/steam_install_parallel_host.c" \
     "$root/source/steam/steam_content.c" "$root/source/steam/steam_manifest.c" \
-    "$root/source/steam/steam_wire.c" "$root/source/steam/steam_storage.c" "$root/source/steam/steam_engine.c" "$root/source/steam/steam_diagnostics.c" \
+    "$root/source/steam/steam_wire.c" "$root/source/steam/steam_storage.c" "$root/source/steam/steam_engine.c" "$root/source/steam/steam_art_zip.c" "$root/source/steam/steam_names.c" "$root/source/steam/steam_file.c" "$root/source/steam/steam_diagnostics.c" \
     $(sdl2-config --libs) -lcurl -lminizip -lmbedcrypto -llzma -lzstd -lz -o "$build/install-parallel"
 "$build/install-parallel"
-$cc $flags "$root/tests/steam_storage_host.c" "$root/source/steam/steam_storage.c" \
+$cc $flags "$root/tests/steam_storage_host.c" \
     "$root/source/steam/steam_content.c" "$root/source/steam/steam_wire.c" -lmbedcrypto -llzma -lzstd -lz -o "$build/storage"
 "$build/storage"
+$cc $flags -I"$root/tests/steam-fs-shims" "$root/tests/steam_sd_directory_host.c" \
+    "$root/source/steam/steam_sd_directory.c" -o "$build/native-directory"
+"$build/native-directory"
+$cc $flags -I"$root/tests/steam-fs-shims" "$root/tests/steam_names_host.c" \
+    "$root/source/sd_steam_names.c" "$root/source/steam/steam_names.c" -pthread -o "$build/names"
+"$build/names"
 $cc $flags -Wno-deprecated-declarations $(pkg-config --cflags libcurl) \
     "$root/tests/steam_probe.c" "$root/source/steam/steam_probe.c" \
     "$root/source/steam/steam_directory.c" $(pkg-config --libs libcurl) -o "$build/probe"

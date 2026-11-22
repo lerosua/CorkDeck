@@ -6,6 +6,12 @@ int steam_storage_directory(const char *root,uint32_t app,char out[512]);
 int steam_storage_pending(const char *root,uint32_t app,char original[512]);
 int steam_storage_plan(const char *root,uint32_t app,const char *title,char out[1024]);
 int steam_storage_record(const char *root,uint32_t app,const char *directory);
+/* Confirm a validated staging directory by listing its parent; path is a
+ * writable full path with a slash. Count successful creations if requested. */
+int steam_storage_confirm_directory(char *path, unsigned *created);
+int steam_storage_needs_parent_listing(const char *path);
+/* Recover missing parents of a manifest entry under an existing staging root. */
+int steam_storage_repair_dirs(const char *stage, const char *relative, int directory_entry);
 /* Deletes only an installation with a matching Autorun marker. Never follows links.
  * Failed deletion retains an AppID-scoped trash directory for retry. */
 unsigned int steam_storage_uninstall(const char *root,uint32_t app,int (*tick)(void *),void *context);

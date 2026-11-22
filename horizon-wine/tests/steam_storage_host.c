@@ -1,12 +1,56 @@
+#define _DEFAULT_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include "../source/steam/steam_storage.h"
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static int hidden_matches, mkdir_attempts;
+static const char *observed_path;
+static struct dirent *fixture_readdir(DIR *dir) {
+  struct dirent *e;
+  while ((e = readdir(dir))) {
+    if (!hidden_matches || strcmp(e->d_name, "多语言")) break;
+    --hidden_matches;
+  }
+  return e;
+}
+static int fixture_mkdir(const char *path, mode_t mode) {
+  if (observed_path && !strcmp(path, observed_path)) ++mkdir_attempts;
+  return mkdir(path, mode);
+}
+#define readdir fixture_readdir
+#define mkdir fixture_mkdir
+#include "../source/steam/steam_storage.c"
+#undef mkdir
+#undef readdir
+
+static void test_parent_listing(const char *stage) {
+  const char *file = "art-picture/多语言/繁体/画室繁体.jpg";
+  char art[512], language[512], child[512];
+  snprintf(art, sizeof(art), "%s/art-picture", stage);
+  snprintf(language, sizeof(language), "%s/art-picture/多语言", stage);
+  snprintf(child, sizeof(child), "%s/art-picture/多语言/繁体", stage);
+  assert(!mkdir(art, 0700) && !mkdir(language, 0700));
+  DIR *handle = opendir(language);
+  assert(handle && !closedir(handle));
+  observed_path = language;
+
+  /* The full path opens even though the parent omits its name. */
+  hidden_matches = 1;
+  assert(steam_storage_repair_dirs(stage, file, 0) && !mkdir_attempts && !hidden_matches);
+  assert(!rmdir(child) && !rmdir(language));
+  /* A newly created directory may also be missing from the next listing. */
+  hidden_matches = 1;
+  assert(steam_storage_repair_dirs(stage, file, 0) && mkdir_attempts == 1 && !hidden_matches);
+  assert(!rmdir(child) && !rmdir(language) && !rmdir(art));
+  observed_path = NULL;
+}
 static void mark(const char *directory, unsigned int app) {
   char p[1024];
   FILE *f;
@@ -71,6 +115,7 @@ int main(void) {
        other[1024];
   int left;
   assert(mkdtemp(root));
+  test_parent_listing(root);
   assert(steam_storage_plan(root, 123, "Example: game / title?", planned));
   assert(strstr(planned, "Example_ game _ title_"));
   assert(!mkdir(planned, 0700));

@@ -45,6 +45,7 @@ unsigned int wine_nx_sd_flush_jump, wine_nx_sd_flush_path, wine_nx_sd_flush_end,
 
 extern void wine_nx_runtime_trace( const char *msg );
 
+extern const devoptab_t *wine_nx_steam_name_device(const devoptab_t *base);
 static const devoptab_t *sd_cache_base;
 static devoptab_t sd_cache_device;
 static pthread_mutex_t sd_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -69,6 +70,14 @@ static void sd_stat_changed( const char *path )
     sd_stat_generation++;
     if (path) sd_stat_forget( &sd_stat_cache, path );
     else sd_stat_forget_all( &sd_stat_cache );
+}
+
+/* Native FS operations bypass the devoptab mkdir hook. */
+void wine_nx_sd_forget_stat( const char *path )
+{
+    pthread_mutex_lock( &sd_cache_mutex );
+    sd_stat_changed( path );
+    pthread_mutex_unlock( &sd_cache_mutex );
 }
 
 struct sd_cache_fill_ctx
@@ -921,7 +930,7 @@ int wine_nx_sd_cache_install(void)
         recursive = 1;
     }
     if (device < 0 || !devoptab_list[device] || sd_cache_base) return 0;
-    sd_cache_base = devoptab_list[device];
+    sd_cache_base = wine_nx_steam_name_device(devoptab_list[device]);
     sd_cache_device = *sd_cache_base;
     sd_cache_device.open_r = sd_cache_open;
     sd_cache_device.close_r = sd_cache_close;

@@ -514,7 +514,8 @@ authenticated:
                     else p->fail_count=1;
                     p->fail_app=install_app;p->fail_downloaded=p->download.downloaded;
                     p->download.attempts=p->fail_count;
-                    p->download.stuck=p->fail_count>=2&&!again;
+                    /* Restarting cannot repair a card I/O error and would discard verified files. */
+                    p->download.stuck=p->fail_count>=2&&!again&&p->download.error!=3101;
                     failed=p->download;
                     SDL_UnlockMutex(p->mutex);
                     steam_download_failure_log(p->root,&failed,failed.stuck?"cannot be continued":again?"will be tried again by itself":"can be continued");

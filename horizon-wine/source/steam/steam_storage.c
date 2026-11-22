@@ -1,12 +1,157 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 #include "steam_storage.h"
 #include "steam_content.h"
+#include "../network_diag.h"
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+/* Opening a directory goes to the SD filesystem even when lstat has a cached
+ * positive or negative entry. libnx's SD device does not support symlinks. */
+static int open_directory(const char *path) {
+#ifndef __SWITCH__
+  struct stat st;
+  if (lstat(path, &st)) return 0;
+  if (!S_ISDIR(st.st_mode)) {
+    errno = ENOTDIR;
+    return 0;
+  }
+#endif
+  DIR *d = opendir(path);
+  return d && !closedir(d);
+}
+
+#ifndef __SWITCH__
+/* Distinguish an absent entry from a failed listing. A usable handle for the
+ * child alone can disagree with the SD card's listing of its parent. */
+static int listed_directory(char *path, const char *pass) {
+  char *slash = strrchr(path, '/');
+  const char *name = slash + 1;
+  *slash = 0;
+  DIR *d = opendir(path);
+  *slash = '/';
+  int err = d ? 0 : errno;
+  unsigned count = 0;
+  int found = 0;
+  if (d) {
+    for (;;) {
+      errno = 0;
+      struct dirent *entry = readdir(d);
+      if (!entry) {
+        err = errno;
+        break;
+      }
+      if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+      ++count;
+      network_diag("stage=steam.resume.list pass=%s type=%u name=%s", pass,
+                   (unsigned)entry->d_type, entry->d_name);
+      if (strcmp(entry->d_name, name)) continue;
+      found = 1;
+      if (entry->d_type == DT_UNKNOWN) {
+        if (!open_directory(path)) err = errno;
+      } else if (entry->d_type != DT_DIR) {
+        err = ENOTDIR;
+      }
+      if (err) break;
+    }
+    if (closedir(d) && !err) err = errno;
+  }
+  network_diag("stage=steam.resume.list pass=%s path=%s entries=%u found=%d errno=%d",
+               pass, path, count, found, err);
+  errno = err;
+  return err ? -1 : found;
+}
+
+int steam_storage_confirm_directory(char *path, unsigned *created) {
+  int listed = listed_directory(path, "before_create");
+  if (listed < 0) return 0;
+  if (open_directory(path)) return 1;
+  if (errno != ENOENT) return 0;
+  int rc = mkdir(path, 0777);
+  int err = rc ? errno : 0;
+  network_diag("stage=steam.resume.component op=explicit_mkdir path=%s ret=%d errno=%d",
+               path, rc, err);
+  if (!rc && created) ++*created;
+  listed = listed_directory(path, "after_create");
+  if (rc && err != EEXIST) {
+    errno = err;
+    return 0;
+  }
+  return listed >= 0 && open_directory(path);
+}
+
+#endif
+
+int steam_storage_needs_parent_listing(const char *path) {
+  const char *art = strstr(path, "/art-picture/");
+  if (!art) return 0;
+  /* The same depot also has Vietnamese and English art under Chinese names.
+   * Check every non-ASCII directory in this tree, including mixed names. */
+  const unsigned char *leaf = (const unsigned char *)strrchr(art, '/') + 1;
+  for (; *leaf; ++leaf)
+    if (*leaf >= 0x80) return 1;
+  return 0;
+}
+
+static int repair_component(const char *path, unsigned *created, const char **op) {
+  *op = "open_directory";
+  if (open_directory(path)) return 1;
+  if (errno != ENOENT) return 0;
+  *op = "mkdir";
+  int rc = mkdir(path, 0777);
+  if (!rc) ++*created;
+  else if (errno != EEXIST) return 0;
+  *op = "verify_directory";
+  return open_directory(path);
+}
+
+int steam_storage_repair_dirs(const char *stage, const char *relative, int directory_entry) {
+  char path[1024], entry[384];
+  size_t root_len = strlen(stage);
+  if (strlen(relative) >= sizeof(entry) || root_len + 1 + strlen(relative) >= sizeof(path)) {
+    errno = ENAMETOOLONG;
+    return 0;
+  }
+  strcpy(entry, relative);
+  if (!steam_content_path(entry)) {
+    errno = EINVAL;
+    return 0;
+  }
+  strcpy(path, stage);
+  unsigned int created = 0;
+  const char *op = "open_stage";
+  if (!open_directory(path)) goto failed;
+  path[root_len] = '/';
+  strcpy(path + root_len + 1, entry);
+  for (char *p = path + root_len + 1; ; ++p) {
+    if (*p && *p != '/') continue;
+    char separator = *p;
+    if (!separator && !directory_entry) break;
+    *p = 0;
+    if (steam_storage_needs_parent_listing(path)) {
+      op = "confirm_parent_listing";
+      if (!steam_storage_confirm_directory(path, &created)) goto failed;
+    } else if (!repair_component(path, &created, &op)) {
+      goto failed;
+    }
+    if (!separator) break;
+    *p = separator;
+  }
+  network_diag("stage=steam.resume.repair result=ready created=%u entry=%s", created, relative);
+  return 1;
+failed: {
+    int err = errno;
+    network_diag("stage=steam.resume.repair result=failed op=%s errno=%d path=%s", op, err, path);
+    errno = err;
+    return 0;
+  }
+}
 static int dir(const char *p, int create) {
   struct stat s;
   if (!lstat(p, &s))
@@ -119,7 +264,9 @@ int steam_storage_plan(const char *root, uint32_t app, const char *title,
   while (n && (name[n - 1] == ' ' || name[n - 1] == '.'))
     --n;
   name[n] = 0;
-  if (!component(name))
+  int unicode_title = 0;
+  for (size_t j = 0; j < n; ++j) if ((unsigned char)name[j] >= 0x80) unicode_title = 1;
+  if (!component(name) || unicode_title)
     snprintf(name, sizeof(name), "Steam game %u", app);
   /* Prefix DOS device names, including forms such as CON.ext. */
   {

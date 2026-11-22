@@ -36,7 +36,7 @@ int steam_engine_busy(struct steam_engine *, const char *relative);
 /* chunks: how many will be submitted. Zero still creates, sizes and verifies
  * the file. existing: the file is already on the card and keeps its bytes. */
 struct steam_engine_file *steam_engine_open(struct steam_engine *,
-                                            const char *relative, uint64_t size,
+                                            const char *relative, const char *target, int archive_part, uint64_t size,
                                             const unsigned char sha[20],
                                             const unsigned char key[32],
                                             unsigned int chunks, int existing);

@@ -80,6 +80,7 @@
 #include <netinet/tcp.h>
 
 #include <sys/iosupport.h>
+#include <switch/runtime/util/utf.h>
 
 /* PE entry points and callbacks currently execute on the libnx host stack.
  * Keep the native TIB truthful; the WoW64 guest stack and allocation ownership
@@ -5440,15 +5441,14 @@ done:
 
 static unsigned int horizon_server_utf16_name_len( const char *name )
 {
-    return name ? strlen( name ) * sizeof(unsigned short) : 0;
+    ssize_t count = name ? utf8_to_utf16( NULL, (const uint8_t *)name, 0 ) : 0;
+    return count > 0 ? count * sizeof(uint16_t) : 0;
 }
 
 static void horizon_server_write_utf16_name( unsigned char *dst, const char *name )
 {
-    unsigned short *wide = (unsigned short *)dst;
-
-    for (; name && *name; name++, wide++)
-        *wide = (unsigned char)*name;
+    if (name) utf8_to_utf16( (uint16_t *)dst, (const uint8_t *)name,
+                             horizon_server_utf16_name_len( name ) / sizeof(uint16_t) );
 }
 
 static unsigned int horizon_server_file_open_flags( const struct horizon_create_file_request *request,
@@ -11249,7 +11249,7 @@ static int horizon_server_wildcard_match_tail( const char *mask, const char *nam
             while (*name)
             {
                 if (horizon_server_wildcard_match_tail( mask, name )) return 1;
-                name++;
+                do name++; while (((unsigned char)*name & 0xc0) == 0x80);
             }
             return horizon_server_wildcard_match_tail( mask, name );
         }
@@ -11257,7 +11257,7 @@ static int horizon_server_wildcard_match_tail( const char *mask, const char *nam
         {
             if (!*name) return 0;
             mask++;
-            name++;
+            do name++; while (((unsigned char)*name & 0xc0) == 0x80);
             continue;
         }
         if (horizon_server_ascii_lower( *mask ) != horizon_server_ascii_lower( *name )) return 0;
@@ -11276,18 +11276,22 @@ static int horizon_server_wildcard_match( const char *mask, const char *name )
 
 static char *horizon_server_dir_mask_from_utf16( const unsigned char *data, unsigned int data_size )
 {
-    unsigned int i, len = data_size / sizeof(unsigned short);
+    size_t len = data_size / sizeof(uint16_t);
+    uint16_t *wide;
     char *mask;
+    ssize_t count;
 
-    if (!data_size) return NULL;
-    if (data_size & 1) return NULL;
-    if (!(mask = malloc( len + 1 ))) return NULL;
-    for (i = 0; i < len; i++)
+    if (!len || (data_size & 1)) return NULL;
+    if (!(wide = calloc( len + 1, sizeof(*wide) ))) return NULL;
+    memcpy( wide, data, data_size );
+    mask = malloc( len * 3 + 1 );
+    if (mask)
     {
-        unsigned int ch = data[i * 2] | (data[i * 2 + 1] << 8);
-        mask[i] = ch < 0x80 ? ch : '?';
+        count = utf16_to_utf8( (uint8_t *)mask, wide, len * 3 );
+        if (count < 0) { free( mask ); mask = NULL; }
+        else mask[count] = 0;
     }
-    mask[len] = 0;
+    free( wide );
     return mask;
 }
 

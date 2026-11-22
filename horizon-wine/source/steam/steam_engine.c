@@ -1,6 +1,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include "steam_engine.h"
+#include "../network_diag.h"
 #include "steam_content.h"
+#include "steam_storage.h"
 #include "steam_wire.h"
 #include <SDL.h>
 #include <errno.h>
@@ -19,7 +21,7 @@ struct steam_engine_file {
   uint64_t size;
   unsigned char sha[20], key[32];
   unsigned int remaining;
-  int existing;
+  int existing, trace_art, archive_part;
   FILE *stream;
 };
 struct node {
@@ -55,7 +57,15 @@ struct worker {
   struct steam_engine *engine;
   unsigned int core;
 };
-static unsigned int io_error(void) { return errno == ENOSPC ? 3102 : 3101; }
+static unsigned int io_error(const struct steam_engine_file *f, const char *operation) {
+  int err = errno;
+  unsigned int fs = 0;
+#ifdef __SWITCH__
+  if (err == EIO) fs = fsdevGetLastResult();
+#endif
+  network_diag("stage=steam.resume.io op=%s errno=%d fs_last=0x%x path=%s", operation, err, fs, f->relative);
+  return err == ENOSPC ? 3102 : 3101;
+}
 /* Without this every thread of a homebrew application stays on the core it was
  * created on, and the decoders would share one core with the network. */
 static void prefer_core(unsigned int core) {
@@ -276,8 +286,9 @@ static int decode(void *opaque) {
 static FILE *create(const struct steam_engine_file *f) {
 #ifdef __SWITCH__
   if (f->size > UINT32_MAX) {
-    if (R_FAILED(fsdevCreateFile(f->path, 0, FsCreateOption_BigFile))) {
-      errno = EIO;
+    Result rc = fsdevCreateFile(f->path, 0, FsCreateOption_BigFile);
+    if (R_FAILED(rc)) {
+      errno = rc == 0x202 ? ENOENT : EIO; /* FS PathNotFound (2002-0001). */
       return NULL;
     }
     return fopen(f->path, "r+b");
@@ -312,19 +323,34 @@ static int write_chunks(void *opaque) {
     started = SDL_GetTicks();
     if (!f->stream) {
       f->stream = f->existing ? fopen(f->path, "r+b") : create(f);
-      if (!f->stream && f->existing && errno == ENOENT)
-        f->stream = create(f);
+      if (!f->stream && !f->archive_part && errno == ENOENT && steam_storage_repair_dirs(e->stage, f->path + strlen(e->stage) + 1, 0)) {
+        f->stream = fopen(f->path, "r+b");
+        /* Only a new file has all its chunks queued. Never replace a vanished
+         * partial file with zeros for chunks previously counted as verified. */
+        if (!f->stream && errno == ENOENT && !f->existing)
+          f->stream = create(f);
+      }
       if (!f->stream)
-        error = io_error();
-      /* Chunks of a large file arrive in any order; giving it its full size
-       * first keeps every write inside the file and its clusters together. */
-      else if (several && ftruncate(fileno(f->stream), (off_t)f->size))
-        error = io_error();
+        error = io_error(f, "open_for_write");
+      else {
+        if (f->trace_art)
+          network_diag("stage=steam.resume.io op=open_for_write ok=1 existing=%d path=%s", f->existing, f->relative);
+        /* Reserve the file's clusters before writing out of order. */
+        if (several && ftruncate(fileno(f->stream), (off_t)f->size))
+          error = io_error(f, "preallocate");
+      }
     }
-    if (!error && n->data &&
-        (fseek(f->stream, (long)n->chunk.offset, SEEK_SET) ||
-         fwrite(n->data, 1, n->chunk.original, f->stream) != n->chunk.original))
-      error = io_error();
+    if (!error && n->data) {
+      if (fseek(f->stream, (long)n->chunk.offset, SEEK_SET))
+        error = io_error(f, "seek");
+      else {
+        size_t written = fwrite(n->data, 1, n->chunk.original, f->stream);
+        if (written != n->chunk.original) error = io_error(f, "write");
+        if (f->trace_art)
+          network_diag("stage=steam.resume.io op=write_chunk offset=%llu requested=%u written=%zu path=%s",
+                       (unsigned long long)n->chunk.offset, n->chunk.original, written, f->relative);
+      }
+    }
     SDL_LockMutex(e->mutex);
     if (n->data) {
       e->view.queued_bytes -= n->chunk.original;
@@ -337,9 +363,10 @@ static int write_chunks(void *opaque) {
     SDL_UnlockMutex(e->mutex);
     free(n->data);
     n->data = NULL;
-    if (!error && last &&
-        (fflush(f->stream) || ftruncate(fileno(f->stream), (off_t)f->size)))
-      error = io_error();
+    if (!error && last) {
+      if (fflush(f->stream)) error = io_error(f, "flush");
+      else if (ftruncate(fileno(f->stream), (off_t)f->size)) error = io_error(f, "truncate");
+    }
     SDL_LockMutex(e->mutex);
     e->view.write_ms += SDL_GetTicks() - started;
     if (error) {
@@ -381,11 +408,14 @@ static int finish(void *opaque) {
     stream = f->stream;
     f->stream = NULL;
     if (fsync(fileno(stream)))
-      error = io_error();
+      error = io_error(f, "sync");
     if (fclose(stream) && !error)
-      error = io_error();
-    if (!error)
+      error = io_error(f, "close");
+    if (!error) {
+      if (f->trace_art)
+        network_diag("stage=steam.resume.io op=file_synced bytes=%llu path=%s", (unsigned long long)f->size, f->relative);
       steam_engine_note(e, f->relative, f->size, f->sha);
+    }
     SDL_LockMutex(e->mutex);
     e->view.sync_ms += SDL_GetTicks() - started;
     if (error)
@@ -465,14 +495,14 @@ int steam_engine_busy(struct steam_engine *e, const char *relative) {
   return busy;
 }
 struct steam_engine_file *steam_engine_open(struct steam_engine *e,
-                                            const char *relative, uint64_t size,
+                                            const char *relative, const char *target, int archive_part, uint64_t size,
                                             const unsigned char sha[20],
                                             const unsigned char key[32],
                                             unsigned int chunks, int existing) {
   struct steam_engine_file *f = calloc(1, sizeof(*f));
   struct node *n = NULL;
   if (!f || strlen(relative) >= sizeof(f->relative) ||
-      snprintf(f->path, sizeof(f->path), "%s/%s", e->stage, relative) >=
+      snprintf(f->path, sizeof(f->path), "%s", target) >=
           (int)sizeof(f->path) ||
       (!chunks && !(n = calloc(1, sizeof(*n))))) {
     free(f);
@@ -482,6 +512,8 @@ struct steam_engine_file *steam_engine_open(struct steam_engine *e,
   f->size = size;
   f->remaining = chunks;
   f->existing = existing;
+  f->archive_part = archive_part;
+  f->trace_art = !strncmp(relative, "art-picture/", sizeof("art-picture/") - 1);
   memcpy(f->sha, sha, 20);
   memcpy(f->key, key, 32);
   SDL_LockMutex(e->mutex);

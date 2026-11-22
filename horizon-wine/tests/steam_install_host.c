@@ -3,8 +3,23 @@
 #define _POSIX_C_SOURCE 200809L
 #include <assert.h>
 #include <curl/curl.h>
+#include <errno.h>
 #include <stdarg.h>
+#include <string.h>
+#include <sys/stat.h>
 #include <sys/statvfs.h>
+static const char *stat_fault_path;
+static const char *cached_directory;
+static int stat_fault_error;
+static int fixture_lstat(const char *name, struct stat *st) {
+  if (cached_directory && !strcmp(name, cached_directory)) return stat(".", st);
+  if (stat_fault_path && !strcmp(name, stat_fault_path)) {
+    stat_fault_path = NULL;
+    errno = stat_fault_error;
+    return -1;
+  }
+  return lstat(name, st);
+}
 static int low_disk;
 static int corrupt_responses,corrupt_forever,short_responses;
 static int language_missing, unlicensed, unlicensed_game, shared_game;
@@ -25,7 +40,9 @@ static CURLcode fixture_perform(CURL *);
 static CURLcode fixture_getinfo(CURL *, CURLINFO, ...);
 static void fixture_cleanup(CURL *);
 static void fixture_reset(CURL *c) { (void)c; }
+#define lstat(name, st) fixture_lstat(name, st)
 #include "../source/steam/steam_install.c"
+#undef lstat
 #include <mbedtls/aes.h>
 #include <zlib.h>
 #include <zstd.h>
@@ -128,11 +145,11 @@ unsigned int steam_cm_error(const struct steam_cm *c) {
 int steam_backend_app(struct steam_backend *b, uint32_t app,
                       struct steam_app *out) {
   (void)b;
-  assert(app == 123);
+  assert(app == 123 || app == 2004770);
   *out = (struct steam_app){.id = app, .windows = 1, .count = 1};
   if(language_missing){out->language_missing=1;out->count=0;out->available_languages=2;return 1;}
   strcpy(out->name,"Fixture: game");
-  out->depots[0] = (struct steam_depot){.id = 124, .source_app = app, .manifest = 999};
+  out->depots[0] = (struct steam_depot){.id = app == 2004770 ? 2004776 : 124, .source_app = app, .manifest = 999};
   /* All of a game's files may be another application's; a small shared
    * depot beside them does not make a refused game this account's. */
   if(shared_game){out->depots[0].source_app=77;out->depots[0].size=1000;out->count=2;out->depots[1]=(struct steam_depot){.id=126,.source_app=228980,.manifest=6,.size=10};}
@@ -351,6 +368,20 @@ int main(void) {
   fixture_cleanup(session.curl);
   requests = 0;
   assert(mkdtemp(root));
+  snprintf(p, sizeof(p), "%s/美术设定集", root);
+  stat_fault_path = p;
+  stat_fault_error = EIO;
+  assert(mkdirs(p) && !stat_fault_path);
+  stat_fault_path = p;
+  stat_fault_error = ENOENT;
+  assert(mkdirs(p) && !stat_fault_path);
+  assert(!rmdir(p));
+  f = fopen(p, "wb");
+  assert(f && fputc(42, f) == 42 && !fclose(f));
+  stat_fault_path = p;
+  assert(!mkdirs(p) && !stat_fault_path && errno == ENOTDIR);
+  f = fopen(p, "rb");
+  assert(f && fgetc(f) == 42 && !fclose(f) && !unlink(p));
   fixtures(root);
   language_missing=1;
   assert(!steam_install_run(&b,root,123,&cb)&&result.error==3111&&result.available_languages==2&&!requests&&!steam_install_present(root,123));

@@ -629,7 +629,7 @@ add_executable(wine-nx-runtime
     source/performance.c
     source/dxvk_releases.c
     source/runtime_platform.c
-    source/sd_cache.c
+    source/sd_cache.c source/sd_steam_names.c
     source/wow64_box64_bridge.c
     source/ntdll_pe_compat.c
     source/ws2_32_unix_stub.c
@@ -678,7 +678,7 @@ target_sources(wine-nx-runtime PRIVATE
     source/steam/steam_cm.c source/steam/steam_cm_route.c source/steam/steam_crypto.c source/steam/steam_provider.c
     source/steam/steam_library.c source/steam/steam_library_cache.c source/steam/steam_detail_cache.c source/steam/steam_app.c source/steam/steam_backend.c
     source/steam/steam_family.c source/steam/steam_settings.c source/steam/steam_session.c source/steam/steam_device_key.c
-    source/steam/steam_content.c source/steam/steam_manifest.c source/steam/steam_install.c source/steam/steam_storage.c source/steam/steam_engine.c
+    source/steam/steam_content.c source/steam/steam_manifest.c source/steam/steam_art_zip.c source/steam/steam_names.c source/steam/steam_install.c source/steam/steam_storage.c source/steam/steam_sd_directory.c source/steam/steam_engine.c
     source/steam/steam_library_ui.c source/steam/steam_prerequisites.c source/steam/steam_prerequisites_ui.c source/steam/steam_local.c
     source/steam/steam_install_script.c
     source/steam/steam_cdn.c source/steam/steam_diagnostics.c source/steam/steam_file.c

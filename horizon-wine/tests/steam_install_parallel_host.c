@@ -131,15 +131,17 @@ static void small_manifest(const char *root,unsigned int files,int mixed){
   unsigned char payload[32768],metadata[128],mapping[1024],chunk[128],sha[20],end[4];
   struct steam_wire_writer pay={payload,sizeof(payload),0,0},meta={metadata,sizeof(metadata),0,0};
   char path[1024],name[64];unsigned int i;FILE *f;
+  unsigned appid = mixed == 4 ? 2004770 : 123, depot = mixed == 4 ? 2004776 : 124;
   fixtures(root); /* also constructs both real encrypted CDN chunks */
   for(i=0;i<files;++i){
     struct steam_wire_writer map={mapping,sizeof(mapping),0,0},w={chunk,sizeof(chunk),0,0};
     const unsigned char *bytes=data+(i%2)*64;
-    size_t size=mixed&&i==9 ? 128 : mixed&&(i==7||i==8) ? 0 : 64;
+    size_t size=(mixed && i==9) || (mixed==5 && i==1) ? 128 : mixed&&(i==7||i==8) ? 0 : 64;
     unsigned int part,parts=size==128 ? 2 : size ? 1 : 0;
     snprintf(name,sizeof(name),i ? "tiny/%03u.dat" : "game.exe",i);
     if(mixed){
-      if(i==7)strcpy(name,"dir");
+      if(i==1)strcpy(name,"art-picture/多语言/繁体/画室繁体.jpg");
+      if(i==7)strcpy(name,mixed == 4 ? "art-picture/多语言/繁体" : "dir");
       if(i==8)strcpy(name,"dir/empty.dat");
       if(i==9)strcpy(name,"big.dat");
       if(i==10||i==11)strcpy(name,"overlap.dat");
@@ -160,10 +162,114 @@ static void small_manifest(const char *root,unsigned int files,int mixed){
     }
     steam_wire_bytes(&pay,1,mapping,map.size);
   }
-  steam_wire_uint(&meta,1,124);steam_wire_uint(&meta,2,999);steam_wire_uint(&meta,4,0);steam_wire_uint(&meta,5,files*64);
-  snprintf(path,sizeof(path),"%s/steam/manifests/123/124-999.manifest",root);f=fopen(path,"wb");assert(f);
+  steam_wire_uint(&meta,1,depot);steam_wire_uint(&meta,2,999);steam_wire_uint(&meta,4,0);steam_wire_uint(&meta,5,files*64);
+  snprintf(path,sizeof(path),"%s/steam/manifests/%u/%u-999.manifest",root,appid,depot);assert(parents(path));f=fopen(path,"wb");assert(f);
   section(f,0x71f617d0,payload,pay.size);section(f,0x1f4812be,metadata,meta.size);section(f,0x1b81b817,sha,20);
   put32(end,0x32c415ab);assert(fwrite(end,1,4,f)==4&&!fclose(f));
+}
+static void resume_missing_parent(const char *root, struct steam_backend *b,
+                                  struct steam_install_callbacks *cb) {
+  const char *image = "art-picture/多语言/繁体/画室繁体.jpg";
+  char stage[512], path[1024], stale[1024];
+  unsigned char saved[64];
+  FILE *f;
+  small_manifest(root, 2, 1);
+  snprintf(stage, sizeof(stage), "%s/steam/staging/123", root);
+  snprintf(path, sizeof(path), "%s/art-picture", stage);
+  assert(mkdirs(path));
+  snprintf(path, sizeof(path), "%s/game.exe", stage);
+  f = fopen(path, "wb");
+  assert(f && fwrite(data, 1, 64, f) == 64 && !fclose(f));
+  snprintf(path, sizeof(path), "%s/%s", stage, STEAM_ENGINE_JOURNAL);
+  f = fopen(path, "w");
+  assert(f && fprintf(f, "%s 64 game.exe\n", hashtext[0]) > 0 && !fclose(f));
+  snprintf(stale, sizeof(stale), "%s/art-picture/多语言", stage);
+  cached_directory = stale; /* lstat insists the parent exists, mkdir(child) sees ENOENT. */
+  requests = auth_required = 0;
+  assert(steam_install_run(b, root, 123, cb) && result.state == STEAM_DOWNLOAD_COMPLETE);
+  cached_directory = NULL;
+  assert(requests == 1 && result.batch_files == 1 && result.downloaded == 128);
+  snprintf(path, sizeof(path), "%s/drive_c/Steam/Fixture_ game/autorun-steam-install.ini", root);
+  f = fopen(path, "rb");
+  struct steam_names *map = NULL;
+  char disk[384];
+  assert(f && steam_names_read(&map, f) && !fclose(f));
+  assert(steam_names_path(map, image, disk, sizeof(disk)) && strcmp(disk, image));
+  assert(!strcmp(steam_names_original(map, strrchr(disk,'/') + 1), "画室繁体.jpg"));
+  steam_names_free(map);
+  snprintf(path, sizeof(path), "%s/drive_c/Steam/Fixture_ game/%s", root, disk);
+  f = fopen(path, "rb");
+  assert(f && fread(saved, 1, 64, f) == 64 && !memcmp(saved, data + 64, 64) && !fclose(f));
+  snprintf(path, sizeof(path), "%s/drive_c/Steam/Fixture_ game/game.exe", root);
+  f = fopen(path, "rb");
+  assert(f && fread(saved, 1, 64, f) == 64 && !memcmp(saved, data, 64) && !fclose(f));
+  assert(!steam_storage_uninstall(root, 123, NULL, NULL));
+}
+/* A two-chunk mapped file retains the first chunk across a restart, including
+ * upgrading a partial file written under its original UTF-8 name. */
+static void resume_mapped_chunks(const char *root, struct steam_backend *backend,
+                                 struct steam_install_callbacks *cb) {
+  const char *image = "art-picture/多语言/繁体/画室繁体.jpg";
+  for (int legacy = 0; legacy < 2; ++legacy) {
+    small_manifest(root, 2, 5);
+    struct steam_names *names = NULL;
+    char relative[384], path[1024];
+    assert(steam_names_collect(&names, image) && steam_names_finish(names));
+    assert(steam_names_path(names, image, relative, sizeof(relative)));
+    snprintf(path, sizeof(path), "%s/steam/staging/123/%s", root, legacy ? image : relative);
+    assert(parents(path));
+    FILE *f = fopen(path, "wb");
+    assert(f && fwrite(data, 1, 64, f) == 64 && !fclose(f));
+    requests = 0;
+    assert(steam_install_run(backend, root, 123, cb));
+    /* One request for game.exe and one for the second image chunk. */
+    assert(requests == 2 && result.downloaded == 192);
+    snprintf(path, sizeof(path), "%s/drive_c/Steam/Fixture_ game/%s", root, relative);
+    unsigned char saved[128];
+    f = fopen(path, "rb");
+    assert(f && fread(saved, 1, 128, f) == 128 && !memcmp(saved, data, 128) && !fclose(f));
+    steam_names_free(names);
+    assert(!steam_storage_uninstall(root, 123, NULL, NULL));
+  }
+}
+/* Resume a verified base file, then interrupt after ZIP publication and
+ * retry. The second run must recover the images without another CDN request. */
+static void resume_art_zip(const char *root, struct steam_backend *b) {
+  const char *member = "art-picture/多语言/繁体/画室繁体.jpg";
+  char path[1024], cache[1024], part[1024];
+  unsigned char saved[64];
+  struct steam_install_callbacks cb = {.tick=fixture_tick, .progress=fixture_progress};
+  unsigned int error;
+  small_manifest(root, 8, 4);
+  snprintf(path, sizeof(path), "%s/steam/staging/2004770/game.exe", root);
+  assert(parents(path));
+  FILE *f = fopen(path, "wb");
+  assert(f && fwrite(data, 1, 64, f) == 64 && !fclose(f));
+  snprintf(path, sizeof(path), "%s/steam/staging/2004770/%s", root, STEAM_ENGINE_JOURNAL);
+  f = fopen(path, "wb");
+  assert(f && fprintf(f, "%s 64 game.exe\n", hashtext[0]) > 0 && !fclose(f));
+  /* A previous ZIP build left an interrupted part. */
+  snprintf(cache, sizeof(cache), "%s/steam/manifests/2004770", root);
+  assert(steam_art_part(cache, member, part));
+  f = fopen(part, "wb");
+  assert(f && fwrite(data+64, 1, 16, f) == 16 && !fclose(f));
+  requests = 0;
+  cancel_at_commit = 1;
+  assert(!steam_install_run(b, root, 2004770, &cb) && result.state == STEAM_DOWNLOAD_CANCELLED);
+  assert(requests == 6);
+  snprintf(cache, sizeof(cache), "%s/steam/manifests/2004770", root);
+  assert(steam_art_part(cache, member, part) && !access(part, F_OK));
+  cancel_at_commit = explicit_discard = requests = 0;
+  assert(steam_install_run(b, root, 2004770, &cb) && !requests && result.downloaded == 448);
+  assert(access(part, F_OK) && errno == ENOENT);
+  snprintf(path, sizeof(path), "%s/drive_c/Steam/Fixture_ game/art-picture.zip", root);
+  unzFile z = unzOpen64(path);
+  assert(z && unzLocateFile(z, member, 1) == UNZ_OK && unzOpenCurrentFile(z) == UNZ_OK);
+  assert(unzReadCurrentFile(z, saved, sizeof(saved)) == 64 && !memcmp(saved, data+64, 64));
+  assert(unzCloseCurrentFile(z) == UNZ_OK);
+  assert(unzLocateFile(z, "art-picture/多语言/繁体/", 1) == UNZ_OK && unzClose(z) == UNZ_OK);
+  assert(!steam_storage_uninstall(root, 2004770, NULL, NULL));
+  assert(!steam_storage_discard(root, 2004770, &error));
 }
 static void small_installer_tests(void){
   char root[]="/tmp/steam-small-install-XXXXXX",path[1024],exe[512];
@@ -223,6 +329,9 @@ static void small_installer_tests(void){
   {struct stat st;assert(!stat(path,&st)&&!st.st_size);}
   assert(!steam_storage_uninstall(root,123,NULL,NULL));
   }
+  resume_missing_parent(root, &b, &cb);
+  resume_mapped_chunks(root, &b, &cb);
+  resume_art_zip(root, &b);
   small_manifest(root,40,0);
   requests=0;cancel_after_first=1;cb.discard_requested=fixture_discard;
   assert(!steam_install_run(&b,root,123,&cb)&&result.state==STEAM_DOWNLOAD_DISCARDED&&!result.cleanup_errno);

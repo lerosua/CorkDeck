@@ -4,6 +4,8 @@
 #include "steam_manifest.h"
 #include "steam_manifest_tls.h"
 #include "steam_engine.h"
+#include "steam_art_zip.h"
+#include "steam_names.h"
 #include "steam_hash.h"
 #include "steam_cdn.h"
 #include "steam_diagnostics.h"
@@ -12,6 +14,7 @@
 #include <SDL.h>
 #include <curl/curl.h>
 #include <errno.h>
+#include <dirent.h>
 #include <mbedtls/sha1.h>
 #include <minizip/unzip.h>
 #include <stdio.h>
@@ -137,13 +140,44 @@ static int path(char *out, size_t cap, const char *root, const char *suffix) {
   int n = snprintf(out, cap, "%s/%s", root, suffix);
   return n > 0 && (size_t)n < cap;
 }
+static int ensure_directory(const char *path) {
+  struct stat st;
+  const char *op = "lstat";
+  int rc = lstat(path, &st);
+  if (rc) {
+    /* mkdir cannot overwrite an existing file. Some FS errors on a missing
+     * path arrive as EIO; let creation report whether it actually exists. */
+    if (errno != ENOENT && errno != EIO) goto failed;
+    op = "mkdir";
+    rc = mkdir(path, 0777);
+    if (!rc) return 1;
+    if (errno != EEXIST) goto failed;
+    op = "recheck";
+    rc = lstat(path, &st);
+    if (rc) goto failed;
+  }
+  if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) return 1;
+  op = "check_type";
+  errno = ENOTDIR;
+failed: {
+    int err = errno;
+    unsigned int fs = 0;
+#ifdef __SWITCH__
+    if (err == EIO) fs = fsdevGetLastResult();
+#endif
+    network_diag("stage=steam.resume.directory op=%s errno=%d fs_last=0x%x path=%s", op, err, fs, path);
+    errno = err;
+    return 0;
+  }
+}
 static int mkdirs(const char *name) {
   char buf[1024];
   char *p;
-  struct stat st;
   size_t n = strlen(name);
-  if (n >= sizeof(buf))
+  if (n >= sizeof(buf)) {
+    errno = ENAMETOOLONG;
     return 0;
+  }
   memcpy(buf, name, n + 1);
   /* A libnx mount prefix is not a directory to create. */
   p = strchr(buf, ':');
@@ -152,11 +186,9 @@ static int mkdirs(const char *name) {
     if (*p == '/' || !*p) {
       char c = *p;
       *p = 0;
-      if (lstat(buf, &st)) {
-        if (errno != ENOENT || mkdir(buf, 0777))
-          return 0;
-      } else if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode))
-        return 0;
+      if (steam_storage_needs_parent_listing(buf)) {
+        if (!steam_storage_confirm_directory(buf, NULL)) return 0;
+      } else if (!ensure_directory(buf)) return 0;
       *p = c;
       if (!c)
         break;
@@ -772,7 +804,9 @@ struct depot_run {
   struct steam_engine *engine;
   struct steam_cdn_server *hosts;
   size_t host_count;
-  const char *stage;
+  const char *stage, *cache;
+  const struct steam_names *names;
+  int legacy_art;
   const unsigned char *key;
   struct steam_manifest *manifest;
   const struct steam_app *app;
@@ -846,18 +880,35 @@ static int run_retry(struct depot_run *r, const struct work *w) {
 }
 /* A directory is checked once, not once per file in it: every check is a
  * round trip to the card. */
-static int run_parent(struct depot_run *r, const char *target) {
+static int run_parent(struct depot_run *r, const char *target, const char *disk_relative) {
   const char *end = strrchr(target, '/');
   size_t n = end ? (size_t)(end - target) : 0;
-  if (!n || n >= sizeof(r->parent))
+  if (!n || n >= sizeof(r->parent)) {
+    errno = n ? ENAMETOOLONG : EINVAL;
     return 0;
+  }
   if (strlen(r->parent) == n && !memcmp(r->parent, target, n))
     return 1;
-  if (!parents(target))
-    return 0;
+  if (!parents(target)) {
+    r->parent[0] = 0;
+    if (errno != ENOENT || !steam_storage_repair_dirs(r->stage, disk_relative, 0))
+      return 0;
+  }
   memcpy(r->parent, target, n);
   r->parent[n] = 0;
   return 1;
+}
+static int mapping_io_error(struct depot_run *r, const char *operation, int err) {
+  struct steam_download_view *v = r->t->view;
+  unsigned int fs = 0;
+#ifdef __SWITCH__
+  if (err == EIO) fs = fsdevGetLastResult();
+#endif
+  snprintf(v->file, sizeof(v->file), "%.127s", r->mapping.path);
+  network_diag("stage=steam.resume.io appid=%u depot=%u op=%s errno=%d fs_last=0x%x path=%s",
+               r->t->app, r->t->depot, operation, err, fs, r->mapping.path);
+  v->error = err == ENOSPC ? INSTALL_DISK : INSTALL_IO;
+  return -1;
 }
 /* 1: the mapping is dealt with (r->chunks set when chunks are wanted);
  * 0: it has to wait for the engine; -1: failed. */
@@ -867,18 +918,25 @@ static int run_file(struct depot_run *r) {
   struct steam_engine_view e;
   struct steam_chunk *chunks = NULL;
   unsigned char *missing = NULL;
-  char target[1024];
+  char target[1024], disk_relative[1024];
   struct stat st;
   size_t count = 0, i, pending;
   int existing = 0;
-  if (!path(target, sizeof(target), r->stage, mapping->path)) {
+  int archived = r->legacy_art && steam_art_member(r->t->app, r->t->depot, mapping);
+  if (archived && (mapping->flags & 64)) return 1; /* Created as a ZIP directory at publication. */
+  if (!steam_names_path(r->names, mapping->path, disk_relative, sizeof(disk_relative))) {
+    v->error = INSTALL_PATH; return -1;
+  }
+  int mapped = !archived && strcmp(disk_relative, mapping->path);
+  if (!(archived ? steam_art_part(r->cache, mapping->path, target)
+                 : path(target, sizeof(target), r->stage, disk_relative))) {
     v->error = INSTALL_PATH;
     return -1;
   }
   if (mapping->flags & 64) {
-    if (!mkdirs(target)) {
-      v->error = errno == ENOSPC ? INSTALL_DISK : INSTALL_IO;
-      return -1;
+    if (!mkdirs(target) &&
+        (errno != ENOENT || !steam_storage_repair_dirs(r->stage, disk_relative, 1))) {
+      return mapping_io_error(r, "directory", errno);
     }
     r->parent[0] = 0;
     return 1;
@@ -889,12 +947,23 @@ static int run_file(struct depot_run *r) {
   if (e.active_files >= OPEN_FILES ||
       steam_engine_busy(r->engine, mapping->path))
     return 0;
-  if (!run_parent(r, target)) {
-    v->error = errno == ENOSPC ? INSTALL_DISK : INSTALL_IO;
-    return -1;
+  if (!archived && !run_parent(r, target, disk_relative)) {
+    return mapping_io_error(r, "parent_directory", errno);
+  }
+  /* Carry a partial file from a pre-mapping installer into the new layout.
+   * Its chunks are checked below, even when the old journal has an entry. */
+  if (mapped && !r->fresh && lstat(target, &st) && errno == ENOENT) {
+    char legacy[1024];
+    if (path(legacy, sizeof(legacy), r->stage, mapping->path) &&
+        !lstat(legacy, &st) && S_ISREG(st.st_mode)) {
+      if (!rename(legacy, target))
+        network_diag("stage=steam.names op=migrate path=%s", mapping->path);
+      else if (errno != ENOENT)
+        return mapping_io_error(r, "migrate_filename", errno);
+    }
   }
   /* A staging folder made by this very attempt holds nothing to look for. */
-  if (!r->fresh) {
+  if (!r->fresh || archived) {
     if (!lstat(target, &st)) {
       if (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
         v->error = INSTALL_PATH;
@@ -902,8 +971,7 @@ static int run_file(struct depot_run *r) {
       }
       existing = 1;
     } else if (errno != ENOENT) {
-      v->error = INSTALL_IO;
-      return -1;
+      return mapping_io_error(r, "stat_file", errno);
     }
   }
   if (!remember_executable(r->app, mapping->path, r->exe, r->exe_count,
@@ -911,7 +979,7 @@ static int run_file(struct depot_run *r) {
     v->error = 5;
     return -1;
   }
-  if (existing && (uint64_t)st.st_size == mapping->size &&
+  if (!mapped && !archived && existing && (uint64_t)st.st_size == mapping->size &&
       steam_engine_verified(r->engine, mapping->path, mapping->size,
                             mapping->sha)) {
     *r->reused += mapping->size;
@@ -939,21 +1007,28 @@ static int run_file(struct depot_run *r) {
   }
   memset(missing, 1, count ? count : 1);
   pending = count;
+  FILE *f = NULL;
   if (existing && count) {
-    /* Bytes left by an interrupted attempt: keep every chunk that still
-     * matches, and if all of them do, the file's own hash comes out of the
-     * same single read. */
-    FILE *f = fopen(target, "rb");
+    f = fopen(target, "rb");
+    if (!f && !archived && errno == ENOENT && steam_storage_repair_dirs(r->stage, disk_relative, 0)) {
+      f = fopen(target, "rb");
+      /* A cached file entry may also have disappeared. All chunks are still
+       * marked missing and none have been credited to the resume counter. */
+      if (!f && errno == ENOENT) existing = 0;
+    }
+    if (!f && existing) {
+      int err = errno;
+      free(chunks);
+      free(missing);
+      return mapping_io_error(r, "open_for_resume", err);
+    }
+  }
+  if (f) {
+    /* Keep every chunk that matches and hash the whole file in the same pass. */
     struct steam_sha1 whole;
     unsigned char digest[20];
     uint64_t measured = millis(), kept = 0;
     int contiguous = 1;
-    if (!f) {
-      free(chunks);
-      free(missing);
-      v->error = INSTALL_IO;
-      return -1;
-    }
     steam_sha1_begin(&whole);
     for (i = 0; i < count; ++i) {
       if (!tick(r->t->cb)) {
@@ -987,7 +1062,7 @@ static int run_file(struct depot_run *r) {
       return 1;
     }
   }
-  r->file = steam_engine_open(r->engine, mapping->path, mapping->size,
+  r->file = steam_engine_open(r->engine, mapping->path, target, archived, mapping->size,
                               mapping->sha, r->key, (unsigned int)pending,
                               existing);
   if (!r->file) {
@@ -1322,16 +1397,42 @@ done:
   run_metrics(r);
   return ok;
 }
-/* While an installation runs the console is not let fall asleep in the middle.
- * The clocks are left alone: the system's boost mode is a clock setting like
- * any other, and the clocks are the owner's (tests/check_no_clock_control.py). */
-static void console_for_download(int on) {
+enum download_power_mode { POWER_DEFAULT, POWER_MEDIA, POWER_SLEEP_ONLY };
+
+/* Media playback policy covers idle dimming as well as automatic sleep. */
+static enum download_power_mode download_power_begin(uint32_t appid) {
 #ifdef __SWITCH__
-  appletSetAutoSleepDisabled(on != 0);
-  if (on && R_FAILED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, 1, 15)))
-    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 1, 7);
+  Result rc = appletSetMediaPlaybackState(true);
+  network_diag("stage=steam.download.power appid=%u policy=media enable=1 rc=0x%x", appid, rc);
+  if (R_SUCCEEDED(rc))
+    return POWER_MEDIA;
+  bool disabled = false;
+  rc = appletIsAutoSleepDisabled(&disabled);
+  if (R_SUCCEEDED(rc) && !disabled) {
+    rc = appletSetAutoSleepDisabled(true);
+    network_diag("stage=steam.download.power appid=%u policy=sleep_only enable=1 rc=0x%x", appid, rc);
+    if (R_SUCCEEDED(rc))
+      return POWER_SLEEP_ONLY;
+  } else {
+    network_diag("stage=steam.download.power appid=%u policy=sleep_only already_disabled=%d query_rc=0x%x",
+                 appid, disabled, rc);
+  }
 #else
-  (void)on;
+  (void)appid;
+#endif
+  return POWER_DEFAULT;
+}
+
+static void download_power_end(uint32_t appid, enum download_power_mode mode) {
+#ifdef __SWITCH__
+  if (mode != POWER_DEFAULT) {
+    Result rc = mode == POWER_MEDIA ? appletSetMediaPlaybackState(false) : appletSetAutoSleepDisabled(false);
+    network_diag("stage=steam.download.power appid=%u policy=%s enable=0 rc=0x%x",
+                 appid, mode == POWER_MEDIA ? "media" : "sleep_only", rc);
+  }
+#else
+  (void)appid;
+  (void)mode;
 #endif
 }
 /* A depot shared with another application has its manifest listed there. */
@@ -1422,8 +1523,10 @@ int steam_install_run(struct steam_backend *backend, const char *root,
   char(*manifest_paths)[1024] = calloc(STEAM_DEPOT_LIMIT, 1024);
   unsigned char keys[STEAM_DEPOT_LIMIT][32], *plain = NULL;
   struct steam_engine *engine = NULL;
+  struct steam_art_zip art = {0};
+  struct steam_names *names = NULL;
   uint64_t reused = 0;
-  int fresh = 0, boosted = 0;
+  int fresh = 0, legacy_art = 0;
   size_t hosts_count = 0, i;
   uint64_t start = millis();
   int ok = 0;
@@ -1437,6 +1540,7 @@ int steam_install_run(struct steam_backend *backend, const char *root,
   int launch_exe_found = 0;
   snprintf(v.language, sizeof(v.language), "%s", backend->language[0] ? backend->language : "english");
   memset(keys, 0, sizeof(keys));
+  enum download_power_mode power = download_power_begin(appid);
   observe_start(&observer);
   if (!manifest_paths) {
     v.error = 5;
@@ -1526,6 +1630,35 @@ int steam_install_run(struct steam_backend *backend, const char *root,
       goto done;
     }
   }
+  /* Only downloads started by the ZIP build have archive parts. Finish those
+   * with their existing journal and partial chunks. New installs use mapped
+   * loose files, including future installations of this same game. */
+  if (!fresh && appid == 2004770) {
+    if (!path(zip, sizeof(zip), stage, "art-picture.zip")) goto path_error;
+    legacy_art = !lstat(zip, &st) && S_ISREG(st.st_mode);
+    if (!legacy_art) {
+      DIR *d = opendir(cache);
+      if (!d) goto io_error;
+      for (;;) {
+        errno = 0;
+        struct dirent *e = readdir(d);
+        if (!e) {
+          int err = errno;
+          closedir(d);
+          if (err && err != ENOENT) { errno = err; goto io_error; }
+          break;
+        }
+        const char *n = e->d_name;
+        if (strlen(n) == 49 && !strncmp(n, "art-", 4) &&
+            strspn(n+4, "0123456789abcdef") == 40 && !strcmp(n+44, ".part")) {
+          legacy_art = 1;
+          closedir(d);
+          break;
+        }
+      }
+    }
+    network_diag("stage=steam.names appid=%u legacy_art_zip=%d", appid, legacy_art);
+  }
   if (!steam_backend_servers(backend, backend->cell_id, hosts, &hosts_count)) {
     v.error = backend->error;
     goto done;
@@ -1605,9 +1738,20 @@ int steam_install_run(struct steam_backend *backend, const char *root,
       goto done;
     }
     v.total += m.total_size;
+    struct steam_manifest_file member;
+    int next;
+    while ((next = steam_manifest_next(&m, &member)) == 1) {
+      if (!tick(cb)) { v.error = INSTALL_CANCELLED; goto done; }
+      if (!(legacy_art && steam_art_member(appid, app.depots[i].id, &member)) && !steam_names_collect(&names, member.path)) {
+        v.error = 5; goto done;
+      }
+    }
+    if (next < 0) { v.error = INSTALL_CORRUPT; goto done; }
     steam_manifest_close(&m);
   }
   {
+    size_t mapped_names = steam_names_finish(names);
+    if (mapped_names) network_diag("stage=steam.names appid=%u components=%zu", appid, mapped_names);
     uint64_t needed = 0;
     v.total = 0;
     for (i = 0; i < app.count; ++i) {
@@ -1625,6 +1769,18 @@ int steam_install_run(struct steam_backend *backend, const char *root,
           v.error = INSTALL_CANCELLED;
           goto done;
         }
+        int archived = legacy_art && steam_art_member(appid, app.depots[i].id, &mapping);
+        if (legacy_art && (!strcasecmp(mapping.path, "art-picture.zip") ||
+            !strcasecmp(mapping.path, "art-picture.zip.previous") ||
+            !strncasecmp(mapping.path, "art-picture.zip/", 16) ||
+            !strncasecmp(mapping.path, "art-picture.zip.previous/", 25))) goto path_error;
+        if (archived) {
+          if (!steam_art_add(&art, &mapping)) { v.error = 5; goto done; }
+          /* STORE uses the full file size again while the resumable parts exist. */
+          uint64_t overhead = 160 + 2 * strlen(mapping.path);
+          if (UINT64_MAX - needed < mapping.size + overhead) goto path_error;
+          needed += mapping.size + overhead;
+        }
         if (mapping.flags & 64)
           continue;
         if (!strcasecmp(mapping.path, "autorun-steam-install.ini") ||
@@ -1632,9 +1788,16 @@ int steam_install_run(struct steam_backend *backend, const char *root,
           v.error = INSTALL_PATH;
           goto done;
         }
-        if (!path(target, sizeof(target), stage, mapping.path))
+        char disk_name[1024];
+        if (!steam_names_path(names, mapping.path, disk_name, sizeof(disk_name)) ||
+            !(archived ? steam_art_part(cache, mapping.path, target) : path(target, sizeof(target), stage, disk_name)))
           goto path_error;
-        if (!fresh && !lstat(target, &st)) {
+        int found = (!fresh || archived) && !lstat(target, &st);
+        if (!found && !fresh && !archived && errno == ENOENT && strcmp(mapping.path, disk_name)) {
+          if (!path(target, sizeof(target), stage, mapping.path)) goto path_error;
+          found = !lstat(target, &st);
+        }
+        if (found) {
           if (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode))
             goto path_error;
           allocated = (uint64_t)st.st_size;
@@ -1679,8 +1842,10 @@ int steam_install_run(struct steam_backend *backend, const char *root,
     v.error = errno == ENOSPC ? INSTALL_DISK : 5;
     goto done;
   }
-  console_for_download(1);
-  boosted = 1;
+#ifdef __SWITCH__
+  if (R_FAILED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, 1, 15)))
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 1, 7);
+#endif
   v.state = STEAM_DOWNLOAD_FILES;
   cdn.rate_tick=millis();cdn.rate_bytes=v.network_bytes;v.bytes_per_second=0;
   progress(cb, &v);
@@ -1705,6 +1870,9 @@ int steam_install_run(struct steam_backend *backend, const char *root,
     run->hosts = hosts;
     run->host_count = hosts_count;
     run->stage = stage;
+    run->cache = cache;
+    run->names = names;
+    run->legacy_art = legacy_art;
     run->key = keys[i];
     run->manifest = &m;
     run->app = &app;
@@ -1726,6 +1894,17 @@ int steam_install_run(struct steam_backend *backend, const char *root,
     if (!finished)
       goto done;
     steam_manifest_close(&m);
+  }
+  if (art.count) {
+    snprintf(v.file, sizeof(v.file), "art-picture.zip");
+    progress(cb, &v);
+    int err = steam_art_publish(&art, cache, stage, cb->tick, cb->context, plain);
+    if (err) {
+      v.error = err == ECANCELED ? INSTALL_CANCELLED : err == ENOSPC ? INSTALL_DISK :
+                err == EBADMSG ? INSTALL_CORRUPT : INSTALL_IO;
+      if (err == EBADMSG) v.integrity_detail = STEAM_INTEGRITY_FILE_SHA;
+      goto done;
+    }
   }
   v.state = STEAM_DOWNLOAD_COMMITTING;
   progress(cb, &v);
@@ -1764,7 +1943,7 @@ int steam_install_run(struct steam_backend *backend, const char *root,
     if (fprintf(file, "depot.%u=%llu\n", app.depots[i].id,
                 (unsigned long long)app.depots[i].manifest) < 0)
       goto io_error;
-  if (fflush(file) || fsync(fileno(file)))
+  if (!steam_names_write(names, file) || fflush(file) || fsync(fileno(file)))
     goto io_error;
   if (fclose(file)) {
     file = NULL;
@@ -1785,6 +1964,7 @@ int steam_install_run(struct steam_backend *backend, const char *root,
       !path(v.executable, sizeof(v.executable), final,
             launch_exe_found ? app.executable : one_exe))
     v.executable[0] = 0;
+  steam_art_cleanup(&art, cache);
   v.state = STEAM_DOWNLOAD_COMPLETE;
   v.error = 0;
   ok = 1;
@@ -1798,8 +1978,7 @@ done:
   steam_cdn_destroy(cdn.pool);
   steam_engine_destroy(engine);
   observe_stop(&observer);
-  if (boosted)
-    console_for_download(0);
+  download_power_end(appid, power);
   if (cdn.curl) curl_easy_cleanup(cdn.curl);
   steam_secret_clear(&cdn, sizeof(cdn));
   v.elapsed_ms = millis() - start;
@@ -1807,6 +1986,8 @@ done:
   if (file)
     fclose(file);
   steam_manifest_close(&m);
+  steam_names_free(names);
+  free(art.entries);
   free(one_exe);
   free(manifest_paths);
   if (plain) {
