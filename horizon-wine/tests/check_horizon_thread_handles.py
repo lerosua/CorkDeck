@@ -48,10 +48,13 @@ fixture = r'''
 #include "horizon_wow64.h"
 #undef TRACE
 #define TRACE(...) ((void)0)
-''' + definitions + '\n' + block(source, 'enum horizon_server_object_type\n') + ';\n' + r'''
+#define horizon_trace(...) ((void)0)
+''' + definitions + '\n' + block(source, 'enum horizon_server_object_type\n') + ';\n' + block(source, 'struct horizon_child_startup\n') + ';\n' + r'''
 struct horizon_server_object {
     unsigned refs, id, mapping_access;
-    int type, file_fd, file_peer_fd, completion_closed;
+    int type, file_fd, file_peer_fd, completion_closed, signaled;
+    struct horizon_server_object *startup_info;
+    struct horizon_child_startup *child_startup;
     struct horizon_server_object *thread_next;
     struct horizon_thread_state thread;
 };

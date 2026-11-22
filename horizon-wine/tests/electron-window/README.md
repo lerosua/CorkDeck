@@ -19,3 +19,12 @@
 浏览器原生日志位于 `/switch/wine/logs/ElectronProbe.log`，开启详细日志或会话记录时沿用 CorkDeck 的命名规则。独立子程序写入同目录的 `ElectronProbe-loader.log` 和 `ElectronProbe-worker.log`。JavaScript 在 EXE 旁边追加 `probe.log` 并保存 `frame-*.png`。按本次浏览器日志的 PID 匹配 loader 的记录。若启动服务直接报错，子程序可能没有本次日志。
 
 探针仅接管指定目录下 ElectronProbe 的 renderer 启动请求。初始 Mojo 管道经本机回环接口转发，Chromium 的只读 field-trial 配置按启动快照传递。运行期间如需向远端复制其他 Wine 对象，浏览器会记录 `DuplicateHandle` 和返回码。子程序从系统内存池申请堆，申请大小和原始返回码记录在 loader 日志。实机能否提供足够的内存是这次验证的一部分。
+
+## 分支归档校验（2026-11-22）
+
+- ARM64 2026.10.12 镜像成功构建 `wine-nx-runtime-nro` 和 `electron-renderer-loader`。
+- `sh horizon-wine/tests/run-host-checks.sh wine` 通过；线程夹具包含实验子进程字段。这些主机测试没有验证跨 Horizon 进程的 Mojo 往返。
+- 重新生成 ExeFS，校验 ACI0 和 ACID 的 `application_type=0`，并通过探针 ZIP CRC、Electron 10.1.5 版本及官方分发包 SHA-256 校验。
+- NRO SHA-256：`7f644a642d6bfe7ad9cc82b3432c0f3c7c87878c7cff2198db2478ae56bc00e1`。
+- ExeFS SHA-256：`7bffc9a834db93b557e71849a01c3cfb6ddc32d55083131a73b7450e7b3cde9b`。
+- 本轮没有再次上机；内存不足的结论未改变。
