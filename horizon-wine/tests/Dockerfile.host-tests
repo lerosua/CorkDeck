@@ -1,0 +1,6 @@
+FROM ghcr.io/autorunhq/switch-dev:2026.10.12@sha256:ba1197f4ff6afe334b960535812ef4c412346cbefb15548d9300d9fc2aebaf23
+RUN apt-get update -qq && apt-get install -y --no-install-recommends \
+    libsdl2-dev libsdl2-ttf-dev libpng-dev libturbojpeg0-dev \
+    libcurl4-openssl-dev libwslay-dev libmbedtls-dev libminizip-dev \
+    liblzma-dev libzstd-dev libssl-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /work

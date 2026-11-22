@@ -20,6 +20,11 @@ build="$(mktemp -d "${TMPDIR:-/tmp}/wine-nx-launcher.XXXXXX")"
 trap 'rm -rf "$build"' EXIT HUP INT TERM
 font="${LAUNCHER_FONT:-/System/Library/Fonts/Supplemental/Arial.ttf}"
 shots="${LAUNCHER_SHOTS:-$build}"
+# Avoid intermittent ASan PIE startup collisions in the Linux fixture.
+clang() {
+    if [ "$(uname -s)" = Linux ]; then command clang -fno-pie -no-pie "$@";
+    else command clang "$@"; fi
+}
 
 # The icons embedded in the launcher must match assets/, and fill as SVG does.
 python3 "$horizon_wine/tools/make-launcher-icons.py" --check
@@ -72,6 +77,7 @@ for name in launcher launcher_catalog launcher_ui launcher_audio launcher_graphi
     sources="$sources $horizon_wine/source/$name.c"
 done
 for file in "$horizon_wine"/source/steam/*.c "$horizon_wine"/source/app/*.c "$horizon_wine"/source/shell/*.c; do
+    case "$file" in */steam_sd_directory.c) continue ;; esac # libnx-only; separate FS fixture
     [ -f "$file" ] && sources="$sources $file"
 done
 # shellcheck disable=SC2086

@@ -31,6 +31,7 @@ for name in launcher launcher_catalog launcher_ui launcher_audio launcher_graphi
     sources="$sources $hw/source/$name.c"
 done
 for file in "$hw"/source/steam/*.c "$hw"/source/app/*.c "$hw"/source/shell/*.c; do
+    case "$file" in */steam_sd_directory.c) continue ;; esac # libnx-only; separate FS fixture
     [ -f "$file" ] && sources="$sources $file"
 done
 if [ ! -x "$build/stand" ] || [ -n "$(find "$hw/source" "$hw/tests/launcher_host.c" -newer "$build/stand" -name '*.[ch]' | head -1)" ]; then

@@ -202,6 +202,25 @@ and `ready=1` on readback. Four files require unavailable features
 and two entries use a directory this launcher does not support. ZIP entry
 timestamps can change the archive hash between runs.
 
+## Host regression checks on Mac or Linux
+
+Run from the repository root after initializing `horizon-dlls`:
+
+```sh
+sh horizon-wine/tests/run-host-checks.sh
+# Or select a suite while working on it:
+sh horizon-wine/tests/run-host-checks.sh steam
+```
+
+On macOS the entry point uses an ARM64 Linux container with SDL, crypto and
+archive development libraries. It builds `tests/Dockerfile.host-tests` if the
+local `corkdeck-menu-host:2026.10.12` image is absent. This keeps Linux compiler
+flags and libnx-only files out of the Mac host compiler. On Linux, install the
+packages listed in that Dockerfile before running the same entry point.
+The fixtures use synthetic accounts and files. They do not connect to Steam
+or install anything on the Switch. Full launcher checks also require the
+built loader NPDM (run the NRO build above first).
+
 ## Historical upstream baseline on Linux/WSL
 
 Baseline revision: `91107d45eb3204ff80d3637bfa37cefd021a3a1c`.
