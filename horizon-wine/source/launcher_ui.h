@@ -84,6 +84,8 @@ struct ui
     int width, height;
     TTF_Font *small, *normal, *large;
     SDL_Texture *glow, *sheen;
+    SDL_Texture *default_covers;
+    int default_covers_tried;
     /* The frame is drawn into screen and copied out at the end of it, so that a
      * modal can keep the screen it opened over in snapshot and dim it. Either
      * may be NULL, and then a modal simply has no screen behind it. */
@@ -195,6 +197,7 @@ void ui_background( struct ui *ui );
 void ui_gradient( struct ui *ui, int x, int y, int w, int h, SDL_Color from, SDL_Color to, int horizontal );
 /* A texture inside rounded corners, tinted by mod: covers, and the light over them.
  * src is the part of the texture to use, or NULL for all of it. */
+void ui_default_cover( struct ui *ui, unsigned int app_id, const char *title, SDL_Rect rect, int radius, int brightness );
 void ui_rounded_texture( struct ui *ui, SDL_Texture *texture, const SDL_Rect *src, SDL_Rect rect, int radius,
                          SDL_Color mod );
 /* White fading to nothing downwards, to stretch over a shape as a sheen. */

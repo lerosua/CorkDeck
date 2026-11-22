@@ -66,7 +66,7 @@ clang -std=gnu11 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-
 "$build/launcher_image" "$horizon_wine/assets/logo.png" "$horizon_wine/assets/autorun.jpg"
 
 
-python3 "$horizon_wine/tools/make-embed.py" "$build/forwarder-icon.c" wine_nx_icon_any "$horizon_wine/assets/autorun.jpg" \
+python3 "$horizon_wine/tools/make-embed.py" "$build/forwarder-icon.c" corkdeck_default_covers "$horizon_wine/assets/default-covers.jpg" wine_nx_icon_any "$horizon_wine/assets/autorun.jpg" \
     corkdeck_font "$horizon_wine/assets/fonts/CorkDeckUI.ttf"
 # Everything the shell is made of, except what tests/launcher_host.c stands in
 # for (the DLL manager's screens and the platform): the list tests/shell-stand.sh

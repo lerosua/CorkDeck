@@ -410,7 +410,7 @@ static void artwork_draw(struct ui *ui, struct steam_artwork *art, uint32_t app,
     ui_rounded_texture(ui, texture, &source, rect, radius,
                        (SDL_Color){bright, bright, bright, 255});
   } else
-    ui_rounded(ui, rect.x, rect.y, rect.w, rect.h, radius, ui->card);
+    ui_default_cover(ui, app, "", rect, radius, bright);
 }
 int steam_library_ui_page(struct ui *ui, struct steam_provider *p,
                           const char *root,
@@ -668,18 +668,6 @@ int steam_library_ui_page(struct ui *ui, struct steam_provider *p,
                              (SDL_Color){244, 247, 250, 255});
         artwork_draw(ui, art, rows[i].app_id, (SDL_Rect){x, y, CARD, CARD}, 14,
                      current ? 255 : 190);
-        {
-          int w = 0, h = 0;
-          if (!steam_artwork_texture(art, rows[i].app_id, &w, &h)) {
-            char letter[8] = {0};
-            size_t n = 1;
-            while ((rows[i].name[n] & 0xc0) == 0x80 && n < 4)
-              ++n;
-            memcpy(letter, rows[i].name, rows[i].name[0] ? n : 0);
-            ui_text_centered(ui, ui->large, x + CARD / 2, y + 80, letter,
-                             ui->dim);
-          }
-        }
         if (rows[i].installed) {
           ui_rounded(ui, x + 12, y + CARD - 34,
                      rows[i].installed == 2 ? 144 : 100, 24, 8,

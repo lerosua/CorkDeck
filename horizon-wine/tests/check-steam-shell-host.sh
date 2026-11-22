@@ -6,8 +6,8 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build=$(mktemp -d)
 trap 'rm -rf "$build"' EXIT HUP INT TERM
-python3 "$root/tools/make-embed.py" "$build/icon.c" wine_nx_icon_any "$root/assets/autorun.jpg" \
-    corkdeck_font "$root/assets/fonts/CorkDeckUI.ttf"
+python3 "$root/tools/make-embed.py" "$build/icon.c" corkdeck_default_covers "$root/assets/default-covers.jpg" wine_nx_icon_any "$root/assets/autorun.jpg" \
+    corkdeck_font "$root/assets/fonts/CorkDeckUI.ttf" steam_community_seed "$root/../docs/compat/reports.tsv"
 clang -std=gnu11 -Wall -Wextra -Werror $(sdl2-config --cflags) \
     "$root/tests/chinese_menu.c" "$root/source/app/app_settings.c" \
     $(sdl2-config --libs) -lSDL2_ttf -o "$build/chinese-menu"
@@ -20,6 +20,7 @@ for name in launcher_catalog launcher_ui launcher_audio launcher_graphics launch
     common="$common $root/source/$name.c"
 done
 for file in "$root"/source/steam/*.c "$root"/source/app/*.c "$root"/source/shell/*.c; do
+    [ "$file" = "$root/source/steam/steam_sd_directory.c" ] && continue # libnx, tested by check-steam-host.sh
     [ -f "$file" ] && common="$common $file"
 done
 for target in launcher steam-adapter; do

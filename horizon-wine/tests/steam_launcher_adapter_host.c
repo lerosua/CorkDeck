@@ -146,6 +146,25 @@ static void cached_library_grid(struct launcher *l)
     assert(!steam_artwork_texture(sh.library_art, 9999, &w, &h));
     assert(!SDL_RenderReadPixels(l->ui.renderer, &center, SDL_PIXELFORMAT_RGBA32, pixel, sizeof(pixel)));
     assert(pixel[0] != 220);
+    /* A cold installed card has only its install marker and the cache left
+     * by the uninstalled grid. It must render that image with no network. */
+    const char *marker = "sdmc:/switch/wine/drive_c/Afterlight/autorun-steam-install.ini";
+    FILE *file = fopen(marker, "w");
+    assert(file && fputs("autorun_steam_install=1\nappid=2004770\n", file) >= 0 && !fclose(file));
+    uint8_t installed[] = {27, 165, 93, 255};
+    snprintf(path, sizeof(path), "%s/steam/artwork/2004770.jpg", l->options->runtime_dir);
+    assert(png_image_write_to_file(&png, path, 0, installed, 0, NULL));
+    sh_forget(0);
+    for (int frame = 0; frame < 200; frame++) {
+        sh_card(l, 0, card, 0, 0);
+        assert(!SDL_RenderReadPixels(l->ui.renderer, &center, SDL_PIXELFORMAT_RGBA32, pixel, sizeof(pixel)));
+        if (!memcmp(pixel, installed, 4)) break;
+        SDL_Delay(5);
+        steam_artwork_tick(sh.library_art, l->ui.renderer);
+    }
+    assert(!memcmp(pixel, installed, 4));
+    assert(!remove(marker));
+    puts("Installed card renders the existing AppID cover from SD offline");
     sh_art_stop();
     ui_quit(&l->ui);
     puts("All 14 uninstalled grid cards render the matching SD cover offline");

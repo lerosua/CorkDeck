@@ -21,7 +21,7 @@ mkdir -p "$build" "$out"
 flags="-std=gnu11 -O1 -g -w -fno-pie"
 [ "${STAND_SANITIZE:-0}" = 1 ] && flags="$flags -fsanitize=address,undefined -fno-omit-frame-pointer"
 
-python3 "$hw/tools/make-embed.py" "$build/forwarder-icon.c" wine_nx_icon_any "$hw/assets/autorun.jpg" \
+python3 "$hw/tools/make-embed.py" "$build/forwarder-icon.c" corkdeck_default_covers "$hw/assets/default-covers.jpg" wine_nx_icon_any "$hw/assets/autorun.jpg" \
     corkdeck_font "$hw/assets/fonts/CorkDeckUI.ttf"
 # Everything the shell is made of, except what tests/launcher_host.c stands in
 # for: the DLL manager's screens and the platform.

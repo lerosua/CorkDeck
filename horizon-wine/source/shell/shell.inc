@@ -71,7 +71,6 @@ static struct shell
     /* Asked once a frame or once a second, not once for every card drawn. */
     struct steam_download_view transfer;
     int transfer_active, transfer_known;
-    unsigned int app_id[LAUNCHER_MAX_ENTRIES];
     /* Covers and wide pictures of Steam games, fetched on a thread of their own. */
     struct steam_artwork *library_art;
     int library_art_started;
@@ -82,7 +81,7 @@ static struct shell
     /* Where the main menu, opened from inside a screen, said to go: every
      * screen on the way back to the root returns when this is set. */
     int pending;
-    char art_portrait[512], art_hero[512];
+    char art_hero[512];
 } sh;
 
 /***********************************************************************
@@ -203,9 +202,12 @@ static int sh_is_steam( struct launcher *l, int index )
     char dir[512], marker[560];
     int depth;
 
+    struct program *p = &l->programs[index];
+
     if (sh.known[index] & 1) return sh.steam[index];
     sh.known[index] |= 1;
     sh.steam[index] = 0;
+    p->steam_app_id = 0;
     snprintf( dir, sizeof(dir), "%s", l->programs[index].path );
     for (depth = 0; depth < 8; depth++)
     {
@@ -218,20 +220,19 @@ static int sh_is_steam( struct launcher *l, int index )
             FILE *f = fopen( marker, "rb" );
 
             sh.steam[index] = 1;
-            sh.app_id[index] = 0;
             while (f && fgets( line, sizeof(line), f ))
-                if (!strncmp( line, "appid=", 6 )) sh.app_id[index] = (unsigned int)strtoul( line + 6, NULL, 10 );
+                if (!strncmp( line, "appid=", 6 )) p->steam_app_id = (unsigned int)strtoul( line + 6, NULL, 10 );
             if (f) fclose( f );
             /* A folder brought over from another card has the marker and not
              * the record Steam's side finds it by, and was offered there as a
              * game still to install. */
-            if (sh.app_id[index] && !steam_storage_directory( l->options->runtime_dir, sh.app_id[index], marker ))
+            if (p->steam_app_id && !steam_storage_directory( l->options->runtime_dir, p->steam_app_id, marker ))
             {
-                int recorded = steam_storage_record( l->options->runtime_dir, sh.app_id[index], dir );
+                int recorded = steam_storage_record( l->options->runtime_dir, p->steam_app_id, dir );
 
-                launcher_log( "[SHELL] the Steam installation of app %u in %s had no record: %s", sh.app_id[index], dir,
+                launcher_log( "[SHELL] the Steam installation of app %u in %s had no record: %s", p->steam_app_id, dir,
                               recorded ? "written" : "could not be written" );
-                if (recorded) { steam_ui_note_install( sh.app_id[index] ); sh.owned_read = 0; }
+                if (recorded) { steam_ui_note_install( p->steam_app_id ); sh.owned_read = 0; }
             }
             break;
         }
@@ -455,14 +456,10 @@ static int sh_art_fetch( const char *url, const char *path )
 static int sh_art_worker( void *unused )
 {
     char url[200];
-    int got = 0;
-
     (void)unused;
-    snprintf( url, sizeof(url), "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/%u/library_600x900.jpg", sh.art_app );
-    if (!SDL_AtomicGet( &sh.art_stop ) && sh_art_fetch( url, sh.art_portrait )) got |= 1;
     snprintf( url, sizeof(url), "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/%u/library_hero.jpg", sh.art_app );
-    if (!SDL_AtomicGet( &sh.art_stop ) && sh_art_fetch( url, sh.art_hero )) got |= 2;
-    SDL_AtomicSet( &sh.art_done, got | 4 );
+    int ok = !SDL_AtomicGet( &sh.art_stop ) && (file_exists( sh.art_hero ) || sh_art_fetch( url, sh.art_hero ));
+    SDL_AtomicSet( &sh.art_done, ok ? 1 : -1 );
     return 0;
 }
 
@@ -473,17 +470,16 @@ static void sh_art_want( struct launcher *l, int index )
     char folder[512];
 
     if (launcher_dlls_busy( l->dlls )) return;
-    if (sh.art_thread || (sh.known[index] & 4) || !sh_is_steam( l, index ) || !sh.app_id[index] ||
-        (p->portrait_art[0] && p->hero_art[0]) || p->missing) return;
+    if (sh.art_thread || (sh.known[index] & 4) || !sh_is_steam( l, index ) || !p->steam_app_id ||
+        p->hero_art[0] || p->missing) return;
     sh.known[index] |= 4;
     runtime_file( l, "steam", folder, sizeof(folder) );
     mkdir( folder, 0777 );
     runtime_file( l, "steam/artwork", folder, sizeof(folder) );
     mkdir( folder, 0777 );
-    snprintf( sh.art_portrait, sizeof(sh.art_portrait), "%s/corkdeck-%u-cover.jpg", folder, sh.app_id[index] );
-    snprintf( sh.art_hero, sizeof(sh.art_hero), "%s/corkdeck-%u-hero.jpg", folder, sh.app_id[index] );
+    snprintf( sh.art_hero, sizeof(sh.art_hero), "%s/corkdeck-%u-hero.jpg", folder, p->steam_app_id );
     sh.art_index = index;
-    sh.art_app = sh.app_id[index];
+    sh.art_app = p->steam_app_id;
     SDL_AtomicSet( &sh.art_done, 0 );
     sh.art_thread = SDL_CreateThreadWithStackSize( sh_art_worker, "corkdeck-art", 256 * 1024, NULL );
 }
@@ -494,25 +490,18 @@ static void sh_art_pump( struct launcher *l )
     int done = SDL_AtomicGet( &sh.art_done );
     struct program *p;
 
-    if (!sh.art_thread || !(done & 4)) return;
+    if (!sh.art_thread || !done) return;
     SDL_WaitThread( sh.art_thread, NULL );
     sh.art_thread = NULL;
     p = &l->programs[sh.art_index];
-    if ((done & 1) && !p->portrait_art[0])
-    {
-        snprintf( p->portrait_art, sizeof(p->portrait_art), "%s", sh.art_portrait );
-        if (p->icon) SDL_DestroyTexture( p->icon );
-        p->icon = NULL;
-        p->icon_state = ICON_UNKNOWN;
-    }
-    if ((done & 2) && !p->hero_art[0])
+    if (done > 0 && !p->hero_art[0])
     {
         snprintf( p->hero_art, sizeof(p->hero_art), "%s", sh.art_hero );
         if (p->hero_icon) SDL_DestroyTexture( p->hero_icon );
         p->hero_icon = NULL;
         p->hero_state = ICON_UNKNOWN;
+        save_library( l );
     }
-    if (done & 3) save_library( l );
 }
 
 static void sh_art_stop( void )
@@ -706,21 +695,9 @@ static void sh_tag( struct ui *ui, int x, int y, int max, const char *text, SDL_
 }
 
 /* A cover that has no picture: a tint taken from the name, and the name. */
-static void sh_blank_cover( struct ui *ui, const char *title, SDL_Rect r, int dimmed )
+static void sh_default_cover( struct ui *ui, unsigned int app_id, const char *title, SDL_Rect r, int radius, int brightness )
 {
-    static const SDL_Color tints[] = { { 91, 108, 138, 255 }, { 154, 75, 58, 255 }, { 63, 127, 115, 255 },
-                                       { 122, 95, 168, 255 }, { 176, 138, 60, 255 }, { 70, 104, 156, 255 },
-                                       { 138, 143, 153, 255 }, { 163, 79, 122, 255 } };
-    unsigned int hash = 0;
-    const char *c;
-    SDL_Color top, bottom;
-
-    for (c = title; *c; c++) hash = hash * 31 + (unsigned char)*c;
-    top = tints[hash % 8];
-    if (dimmed) top = (SDL_Color){ top.r / 2 + 20, top.g / 2 + 22, top.b / 2 + 26, 255 };
-    bottom = (SDL_Color){ top.r / 4, top.g / 4, top.b / 4, 255 };
-    ui_rounded( ui, r.x, r.y, r.w, r.h, 10, top );
-    ui_gradient( ui, r.x, r.y + r.h / 3, r.w, r.h - r.h / 3, top, bottom, 0 );
+    ui_default_cover( ui, app_id, title, r, radius, brightness );
     sh_title( ui, r.x + 10, r.y + r.h - 10, r.w - 20, title, ui->value );
 }
 
@@ -734,6 +711,19 @@ static struct steam_artwork *sh_library_art( struct launcher *l )
     return sh.library_art;
 }
 
+static int sh_draw_steam_cover( struct launcher *l, unsigned int app_id, SDL_Rect rect, int radius, int brightness )
+{
+    int width, height;
+    if (!app_id) return 0;
+    struct steam_artwork *art = sh_library_art( l );
+    steam_artwork_request( art, app_id );
+    SDL_Texture *texture = steam_artwork_texture( art, app_id, &width, &height );
+    if (!texture) return 0;
+    SDL_Rect crop = cover_crop( width, height, rect.w, rect.h );
+    ui_rounded_texture( &l->ui, texture, &crop, rect, radius, (SDL_Color){brightness, brightness, brightness, 255} );
+    return 1;
+}
+
 static void sh_card( struct launcher *l, int item, SDL_Rect r, int focused, int code )
 {
     struct ui *ui = &l->ui;
@@ -742,16 +732,8 @@ static void sh_card( struct launcher *l, int item, SDL_Rect r, int focused, int 
     {
         const struct steam_game *game = &sh.owned[-1 - item];
 
-        struct steam_artwork *art = sh_library_art( l );
-        int width, height;
-        steam_artwork_request( art, game->app_id );
-        SDL_Texture *texture = steam_artwork_texture( art, game->app_id, &width, &height );
-        if (texture)
-        {
-            SDL_Rect crop = cover_crop( width, height, r.w, r.h );
-            ui_rounded_texture( ui, texture, &crop, r, 10, (SDL_Color){255, 255, 255, 255} );
-        }
-        else sh_blank_cover( ui, game->name, r, 1 );
+        if (!sh_draw_steam_cover( l, game->app_id, r, 10, 255 ))
+            sh_default_cover( ui, game->app_id, game->name, r, 10, 210 );
         sh_tag( ui, r.x + 8, r.y + 8, r.w - 16, "NOT INSTALLED", ui->dim );
     }
     else
@@ -759,11 +741,16 @@ static void sh_card( struct launcher *l, int item, SDL_Rect r, int focused, int 
         struct program *p = &l->programs[item];
         struct steam_download_view d;
 
-        request_art( l, item, ART_PORTRAIT );
-        if (p->icon && p->icon_is_art) draw_cover( ui, p, r, 10, p->missing ? 110 : 255, 255 );
-        else sh_blank_cover( ui, p->title, r, p->missing );
+        int steam = sh_is_steam( l, item );
+        int brightness = p->missing ? 110 : 255;
+        if (!sh_draw_steam_cover( l, p->steam_app_id, r, 10, brightness ))
+        {
+            request_art( l, item, ART_PORTRAIT );
+            if (p->icon && p->icon_is_art) draw_cover( ui, p, r, 10, brightness, 255 );
+            else sh_default_cover( ui, p->steam_app_id, p->title, r, 10, brightness );
+        }
         if (p->missing) sh_tag( ui, r.x + 8, r.y + 8, r.w - 16, usb_program_path( p->path ) ? "USB REMOVED" : "FILE MISSING", SH_AMBER );
-        else if (sh_is_steam( l, item ))
+        else if (steam)
         {
             if (sh_download( &d ) && d.total && strstr( p->path, d.executable[0] ? d.executable : "\n" ))
                 sh_tag( ui, r.x + 8, r.y + 8, r.w - 16, "UPDATING", SH_BLUE );
@@ -1629,7 +1616,7 @@ static void sh_delete_from_card( struct launcher *l, int index, int *gone )
     {
         sh.known[index] &= ~1;
         sh_is_steam( l, index );
-        app = sh.app_id[index];
+        app = p->steam_app_id;
         if (steam_ui_busy( app ))
         {
             ui_message( ui, sh_tr( "Delete from the card" ),
@@ -2027,6 +2014,17 @@ static int sh_app_page( struct launcher *l, int index, char *target, size_t size
 
             ui_rounded_texture( ui, p->hero_icon, NULL, all, 0, (SDL_Color){ 90, 100, 115, 255 } );
             ui_gradient( ui, 0, 0, ui->width, ui->height, (SDL_Color){ 14, 20, 27, 245 }, (SDL_Color){ 14, 20, 27, 150 }, 1 );
+        }
+        else
+        {
+            SDL_Rect cover = {SH_MARGIN, 96, 92, 138};
+            steam_artwork_tick( sh.library_art, ui->renderer );
+            if (!sh_draw_steam_cover( l, p->steam_app_id, cover, 8, 255 ))
+            {
+                request_art( l, index, ART_PORTRAIT );
+                if (p->icon && p->icon_is_art) draw_cover( ui, p, cover, 8, 255, 255 );
+                else ui_default_cover( ui, p->steam_app_id, p->title, cover, 8, 255 );
+            }
         }
         sh_top( l, sh_tr( "Library" ), p->title );
 
@@ -3423,8 +3421,12 @@ static void sh_start_screen( struct launcher *l, struct program *p )
         ui_rounded_texture( ui, p->hero_icon, NULL, all, 0, (SDL_Color){ 110, 120, 135, 255 } );
         ui_gradient( ui, 0, 0, ui->width, ui->height, (SDL_Color){ 14, 20, 27, 235 }, (SDL_Color){ 14, 20, 27, 120 }, 1 );
     }
-    if (p->icon && p->icon_is_art) draw_cover( ui, p, (SDL_Rect){ x, y, cover_w, cover_h }, 6, 255, 255 );
-    else sh_blank_cover( ui, p->title, (SDL_Rect){ x, y, cover_w, cover_h }, 0 );
+    SDL_Rect cover = { x, y, cover_w, cover_h };
+    if (!sh_draw_steam_cover( l, p->steam_app_id, cover, 6, 255 ))
+    {
+        if (p->icon && p->icon_is_art) draw_cover( ui, p, cover, 6, 255, 255 );
+        else sh_default_cover( ui, p->steam_app_id, p->title, cover, 6, 255 );
+    }
     tx = x + cover_w + 44;
     sh_fit( ui, ui->large, tx, y + 96, ui->width - tx - SH_MARGIN, p->title, ui->value, 0 );
     ui_text( ui, ui->normal, tx, y + 96 + TTF_FontHeight( ui->large ) + 14, "Starting...", SH_BLUE );

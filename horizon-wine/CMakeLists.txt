@@ -671,7 +671,7 @@ target_sources(wine-nx-runtime PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/forwarder_embed.c"
     source/launcher.c source/launcher_graphics.c source/launcher_catalog.c source/launcher_console.c
     source/launcher_svg.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c
-    source/launcher_image.c source/steamgriddb.c
+    source/launcher_image.c source/shell/default_cover.c source/steamgriddb.c
     source/app/app_settings.c source/app/app_records.c
     source/steam/steam_probe.c source/steam/steam_directory.c source/steam/steam_ui.c
     source/steam/steam_wire.c source/steam/steam_cm_message.c source/steam/steam_auth.c
@@ -748,6 +748,7 @@ if(ELF2NSO AND NPDMTOOL)
                 wine_nx_game_forwarder_main "${GAME_FORWARDER_NSO}"
                 wine_nx_hbl_npdm "${HBL_NPDM}"
                 wine_nx_icon_any "${CMAKE_CURRENT_SOURCE_DIR}/assets/autorun.jpg"
+                corkdeck_default_covers "${CMAKE_CURRENT_SOURCE_DIR}/assets/default-covers.jpg"
                 wine_nx_logo "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo.png"
                 corkdeck_font "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/CorkDeckUI.ttf"
                 corkdeck_steam_api "${CMAKE_CURRENT_SOURCE_DIR}/assets/steamworks/steam_api.dll"
@@ -759,6 +760,7 @@ if(ELF2NSO AND NPDMTOOL)
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/steamworks/steamclient-local.dll"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/CorkDeckUI.ttf"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/autorun.jpg"
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/default-covers.jpg"
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo.png"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tools/make-embed.py"
         VERBATIM
@@ -1003,7 +1005,7 @@ endif()
 # functions come through eglGetProcAddress, so it works over either Mesa.
 find_library(SWITCH_SDL2 SDL2 HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
 find_library(SWITCH_SDL2_TTF SDL2_ttf HINTS "$ENV{DEVKITPRO}/portlibs/switch/lib")
-set_source_files_properties(source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/steamgriddb.c source/dxvk_releases.c source/osk.c PROPERTIES
+set_source_files_properties(source/shell/default_cover.c source/launcher.c source/launcher_catalog.c source/launcher_graphics.c source/launcher_ui.c source/launcher_audio.c source/launcher_forwarder.c source/launcher_image.c source/launcher_setup.c source/launcher_swap.c source/launcher_dlls.c source/steamgriddb.c source/dxvk_releases.c source/osk.c PROPERTIES
     INCLUDE_DIRECTORIES "$ENV{DEVKITPRO}/portlibs/switch/include/SDL2"
     COMPILE_DEFINITIONS _REENTRANT)
 # The mark in the corner is only there in the build that generates it.

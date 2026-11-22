@@ -442,6 +442,7 @@ void ui_quit( struct ui *ui )
     for (i = 0; i < GLYPH_COUNT; i++)
         if (ui->glyphs[i]) SDL_DestroyTexture( ui->glyphs[i] );
     if (ui->glow) SDL_DestroyTexture( ui->glow );
+    if (ui->default_covers) SDL_DestroyTexture( ui->default_covers );
     if (ui->sheen) SDL_DestroyTexture( ui->sheen );
     if (ui->screen) SDL_DestroyTexture( ui->screen );
     if (ui->snapshot) SDL_DestroyTexture( ui->snapshot );

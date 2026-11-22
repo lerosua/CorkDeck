@@ -99,6 +99,7 @@ struct program
     int own_files;                     /* settings, arguments, controls or Box64 options beside it */
     int added;                         /* listed in launcher-library.txt */
     unsigned int catalog_id;
+    unsigned int steam_app_id;
     unsigned int added_order;
     unsigned int launched_order;
     int favorite;
