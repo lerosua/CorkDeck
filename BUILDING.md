@@ -245,7 +245,9 @@ NRO SHA-256: `3e8503df8fb5f147a1361124c59a93b0f16c4f30d21183a16e7975a35489599a`.
 These are build and host-fixture results; no new Switch playability claim is
 made. The independent SystemModule renderer is isolated on
 `codex/electron-renderer-experiment`, remains paused at the memory limit in
-[TODO.md](TODO.md), and is absent from this branch's runtime sources.
+[TODO.md](TODO.md), and is absent from the Chinese-menu runtime sources. This experimental
+branch includes that code for preservation; building it does not resolve the
+recorded memory blocker.
 
 ## Historical upstream baseline on Linux/WSL
 

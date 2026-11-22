@@ -633,6 +633,12 @@ target_compile_definitions(wine-nx-hbl PRIVATE VERSION="3.0.0")
 target_link_options(wine-nx-hbl PRIVATE -Wl,-wrap,exit)
 target_link_libraries(wine-nx-hbl PRIVATE nx)
 
+add_executable(electron-renderer-loader EXCLUDE_FROM_ALL hbl/source/main.c hbl/source/trampoline.s)
+set_target_properties(electron-renderer-loader PROPERTIES SUFFIX ".elf" C_STANDARD 11)
+target_compile_definitions(electron-renderer-loader PRIVATE VERSION="probe" CORKDECK_RENDERER_LOADER)
+target_link_options(electron-renderer-loader PRIVATE -Wl,-wrap,exit)
+target_link_libraries(electron-renderer-loader PRIVATE nx)
+
 add_executable(autorun-game-forwarder source/game_forwarder.c)
 set_target_properties(autorun-game-forwarder PROPERTIES SUFFIX ".elf" C_STANDARD 11)
 target_link_options(autorun-game-forwarder PRIVATE -Wl,--gc-sections)
@@ -640,6 +646,7 @@ target_link_libraries(autorun-game-forwarder PRIVATE nx)
 
 add_executable(wine-nx-runtime
     source/runtime.c
+    source/probe_renderer.c
     source/electron_probe.c
     source/performance.c
     source/dxvk_releases.c

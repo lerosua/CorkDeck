@@ -49,6 +49,7 @@
 #include "unix_private.h"
 #include "horizon_mman.h"
 #include "horizon_private.h"
+#include "../../../horizon-wine/source/probe_renderer.h"
 
 #include <switch.h>
 
@@ -3400,6 +3401,15 @@ struct horizon_server_handle_entry
 
 static struct horizon_reg horizon_registry;
 
+#ifndef HORIZON_STANDALONE_SYNTAX
+static unsigned probe_wine_pid, probe_wine_tid;
+void horizon_probe_identity(unsigned pid, unsigned tid)
+{
+    probe_wine_pid = pid;
+    probe_wine_tid = tid;
+}
+#endif
+static LONG horizon_server_next_tid = 4;
 static LONG horizon_server_next_handle = 0x100;
 static pthread_mutex_t horizon_server_objects_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Pending selects and thread start gates sleep here, releasing the object lock;
@@ -6707,6 +6717,13 @@ static int horizon_server_handle_init_first_thread( struct horizon_server_connec
      * new_thread. A kernel-derived id could equal a later worker's id or share
      * its NtWaitForAlertByThreadId slot ((tid >> 2) - 1) and lose wakeups. */
     reply.tid = 4;
+#ifndef HORIZON_STANDALONE_SYNTAX
+    if (probe_wine_pid) {
+        reply.pid = probe_wine_pid;
+        reply.tid = probe_wine_tid;
+        horizon_server_next_tid = reply.tid;
+    }
+#endif
     reply.session_id = 1;
     connection->pid = reply.pid;
     connection->tid = reply.tid;
@@ -6816,6 +6833,23 @@ static int horizon_server_handle_dup_handle( struct horizon_server_connection *c
     struct horizon_dup_handle_reply reply;
 
     memset( &reply, 0, sizeof(reply) );
+#ifndef HORIZON_STANDALONE_SYNTAX
+    /* The relay carries bytes. A subsequent DuplicateHandle into another
+     * process needs an object transfer protocol; returning a local handle
+     * here could silently refer to an unrelated object in the renderer. */
+    pthread_mutex_lock(&horizon_server_objects_mutex);
+    struct horizon_server_handle_entry *src = horizon_server_find_handle_locked(request->src_process);
+    struct horizon_server_handle_entry *dst = horizon_server_find_handle_locked(request->dst_process);
+    int remote = (src && src->object->startup_info && src->object->startup_info->child_startup->child_peb) ||
+                 (dst && dst->object->startup_info && dst->object->startup_info->child_startup->child_peb);
+    pthread_mutex_unlock(&horizon_server_objects_mutex);
+    if (remote) {
+        horizon_trace("[EPROBE] DuplicateHandle cross-process handle=0x%x src=0x%x dst=0x%x status=0xc00000bb",
+                      request->src_handle, request->src_process, request->dst_process);
+        reply.header.error = STATUS_NOT_SUPPORTED;
+        return horizon_server_write_reply(connection->reply_fd, &reply, sizeof(reply), NULL, 0);
+    }
+#endif
     reply.header.error = horizon_server_duplicate_object_handle( request->src_handle, request->access,
                                                                 request->options, &reply.handle );
 
@@ -6882,7 +6916,22 @@ static int horizon_server_handle_open_process( struct horizon_server_connection 
     struct horizon_server_handle_entry *entry;
 
     pthread_mutex_lock( &horizon_server_objects_mutex );
-    if (request->pid != connection->pid) reply.header.error = HORIZON_STATUS_INVALID_CID;
+    if (request->pid != connection->pid) {
+        reply.header.error = HORIZON_STATUS_INVALID_CID;
+        for (entry = horizon_server_handles; entry; entry = entry->next) {
+            struct horizon_server_object *o = entry->object;
+            if (o->type != HORIZON_SERVER_OBJECT_PROCESS || !o->startup_info || o->signaled ||
+                !o->startup_info->child_startup->child_peb || o->startup_info->child_startup->pid != request->pid) continue;
+            struct horizon_server_handle_entry *opened = horizon_server_create_handle_for_object_locked(o);
+            if (!opened) reply.header.error = HORIZON_STATUS_NO_MEMORY;
+            else {
+                opened->access = horizon_process_map_access(request->access);
+                reply.handle = opened->handle;
+                reply.header.error = 0;
+            }
+            break;
+        }
+    }
     else if (!(entry = horizon_server_create_handle_locked( HORIZON_SERVER_OBJECT_PROCESS )))
         reply.header.error = HORIZON_STATUS_NO_MEMORY;
     else
@@ -11624,8 +11673,6 @@ static void horizon_server_follow_client( struct horizon_server_connection *conn
 
 
 
-static LONG horizon_server_next_tid = 4;
-
 #ifndef HORIZON_STANDALONE_SYNTAX
 static int horizon_server_handle_new_process( struct horizon_server_connection *connection,
                                             const struct new_process_request *req,
@@ -11734,15 +11781,164 @@ static int horizon_server_handle_get_new_process_info( struct horizon_server_con
 }
 
 /* The only exported descriptor is the client end of Electron's byte pipe. */
+int horizon_probe_export(unsigned handle)
+{
+    int fd = -1;
+    struct horizon_server_handle_entry *e;
+    pthread_mutex_lock(&horizon_server_objects_mutex);
+    e = horizon_server_find_handle_locked(handle);
+    if (e && e->object->type == HORIZON_SERVER_OBJECT_NAMED_PIPE &&
+        !(e->object->pipe_flags & HORIZON_NAMED_PIPE_SERVER_END)) {
+        struct horizon_pipe_file *p = horizon_pipe_endpoint(e->object->file_fd);
+        if (p && p->reverse && p->mojo_server) {
+            fd = dup(e->object->file_fd);
+            if (fd >= 0) p->async = 1;
+        }
+    }
+    pthread_mutex_unlock(&horizon_server_objects_mutex);
+    return fd;
+}
 
+static struct horizon_server_handle_entry *probe_fixed_handle_locked(unsigned handle, unsigned type)
+{
+    if (!handle || handle > 0x100000 || (handle & 3) || horizon_server_find_handle_locked(handle)) return NULL;
+    struct horizon_server_handle_entry *e = horizon_server_create_handle_locked(type);
+    if (!e) return NULL;
+    horizon_server_unlink_handle_locked(e);
+    e->object->id = e->handle = handle;
+    horizon_server_link_handle_locked(e);
+    if ((unsigned)horizon_server_next_handle < handle) horizon_server_next_handle = handle;
+    return e;
+}
 
+int horizon_probe_export_trials(struct probe_trials *trials)
+{
+    int ok = 0;
+    pthread_mutex_lock(&horizon_server_objects_mutex);
+    struct horizon_server_handle_entry *e = horizon_server_find_handle_locked(trials->handle);
+    if (e && e->object->type == HORIZON_SERVER_OBJECT_MAPPING && e->object->mapping_memfile &&
+        !e->object->mapping_has_image && e->object->mapping_size > 0 &&
+        e->object->mapping_size <= sizeof(trials->data)) {
+        trials->size = e->object->mapping_size;
+        ok = horizon_memfile_pread(e->object->mapping_memfile, trials->data, trials->size, 0) == trials->size;
+    }
+    pthread_mutex_unlock(&horizon_server_objects_mutex);
+    return ok;
+}
 
+int horizon_probe_import_trials(const struct probe_trials *trials)
+{
+    if (!trials->size || trials->size > sizeof(trials->data)) return 0;
+    int fd = horizon_memfile_create(trials->size, 0);
+    if (fd < 0) return 0;
+    struct horizon_memfile *file = horizon_memfile_from_fd(fd);
+    if (horizon_memfile_pwrite(file, trials->data, trials->size, 0) != trials->size) {
+        close(fd);
+        return 0;
+    }
+    pthread_mutex_lock(&horizon_server_objects_mutex);
+    struct horizon_server_handle_entry *e = probe_fixed_handle_locked(trials->handle, HORIZON_SERVER_OBJECT_MAPPING);
+    if (e) {
+        e->object->file_fd = fd;
+        e->object->file_access = e->object->mapping_file_access = FILE_READ_DATA;
+        e->object->mapping_size = trials->size;
+        e->object->mapping_flags = SEC_COMMIT;
+        e->object->mapping_access = SECTION_QUERY | SECTION_MAP_READ;
+        e->object->mapping_memfile = file;
+    }
+    pthread_mutex_unlock(&horizon_server_objects_mutex);
+    if (!e) close(fd);
+    return e != NULL;
+}
 
+int horizon_probe_import(unsigned handle)
+{
+    int pair[2];
+    if (horizon_duplex_pipe(pair, 1)) return -1;
+    pthread_mutex_lock(&horizon_server_objects_mutex);
+    struct horizon_server_handle_entry *e = probe_fixed_handle_locked(handle, HORIZON_SERVER_OBJECT_NAMED_PIPE);
+    if (e) {
+        e->object->file_fd = pair[1];
+        e->object->file_access = FILE_GENERIC_READ | FILE_GENERIC_WRITE;
+        e->object->file_sharing = FILE_SHARE_READ | FILE_SHARE_WRITE;
+        e->object->signaled = 1;
+        horizon_pipe_endpoint(pair[1])->mojo_server = handle;
+        horizon_pipe_endpoint(pair[1])->async = 1;
+    }
+    pthread_mutex_unlock(&horizon_server_objects_mutex);
+    if (e) return pair[0];
+    close(pair[0]);
+    close(pair[1]);
+    return -1;
+}
 
+static unsigned probe_resume_tid;
+static int probe_resumed;
 
+int horizon_probe_query_child(unsigned handle, PROCESS_BASIC_INFORMATION *pbi)
+{
+    int found = 0;
+    pthread_mutex_lock(&horizon_server_objects_mutex);
+    struct horizon_server_handle_entry *e = horizon_server_find_handle_locked(handle);
+    if (e && e->object->type == HORIZON_SERVER_OBJECT_PROCESS && e->object->startup_info) {
+        struct horizon_child_startup *s = e->object->startup_info->child_startup;
+        if (s->child_peb) {
+            found = 1;
+            pbi->UniqueProcessId = s->pid;
+            pbi->InheritedFromUniqueProcessId = s->parent_pid;
+            pbi->PebBaseAddress = (PEB *)s->child_peb;
+            pbi->ExitStatus = e->object->signaled ? STATUS_PROCESS_IS_TERMINATING : STATUS_PENDING;
+        }
+    }
+    pthread_mutex_unlock(&horizon_server_objects_mutex);
+    return found;
+}
 
+void horizon_probe_started(unsigned handle, uintptr_t peb)
+{
+    struct horizon_server_object *info;
+    pthread_mutex_lock(&horizon_server_objects_mutex);
+    if (!horizon_server_find_typed_object_locked(handle, HORIZON_SERVER_OBJECT_STARTUP_INFO, &info)) {
+        info->child_startup->child_peb = peb;
+        probe_resume_tid = info->child_startup->initial_tid;
+        probe_resumed = 0;
+        info->child_startup->status = 0;
+        info->signaled = 1;
+        horizon_sync_notify_object_locked(info, 1);
+    }
+    pthread_mutex_unlock(&horizon_server_objects_mutex);
+}
 
+int horizon_probe_suspended(unsigned tid)
+{
+    int suspended = -1;
+    pthread_mutex_lock(&horizon_server_objects_mutex);
+    for (struct horizon_server_handle_entry *e = horizon_server_handles; e; e = e->next)
+        if (e->object->type == HORIZON_SERVER_OBJECT_THREAD && e->object->thread.tid == tid) {
+            suspended = e->object->thread.suspend;
+            break;
+        }
+    if (probe_resume_tid == tid && probe_resumed) suspended = 0;
+    pthread_mutex_unlock(&horizon_server_objects_mutex);
+    return suspended;
+}
 
+void horizon_probe_ended(unsigned tid)
+{
+    pthread_mutex_lock(&horizon_server_objects_mutex);
+    for (struct horizon_server_handle_entry *e = horizon_server_handles; e; e = e->next) {
+        struct horizon_server_object *o = e->object;
+        if (o->type == HORIZON_SERVER_OBJECT_PROCESS && o->startup_info &&
+            o->startup_info->child_startup->initial_tid == tid) {
+            o->signaled = 1;
+            horizon_sync_notify_object_locked(o, 1);
+        } else if (o->type == HORIZON_SERVER_OBJECT_THREAD && o->thread.tid == tid && !o->thread.terminated) {
+            horizon_thread_mark_terminated(&o->thread, horizon_server_now());
+            horizon_sync_notify_object_locked(o, 1);
+        }
+    }
+    pthread_mutex_unlock(&horizon_server_objects_mutex);
+}
 
 void horizon_abort_child_startup( unsigned int process, unsigned int thread, unsigned int status )
 {
@@ -11896,8 +12092,10 @@ static int horizon_server_handle_resume_thread( struct horizon_server_connection
     {
         status = horizon_thread_resume( &object->thread, &reply.count );
 #ifndef HORIZON_STANDALONE_SYNTAX
-        if (!status && reply.count == 1)
+        if (!status && reply.count == 1) {
+            if (object->thread.tid == probe_resume_tid) probe_resumed = 1;
             horizon_server_set_suspend_doorbell_locked( object, 0 );
+        }
 #endif
     }
     horizon_server_signal_changed_locked();  /* the start gate */

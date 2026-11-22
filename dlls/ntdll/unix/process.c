@@ -764,6 +764,20 @@ static void trace_child_result( unsigned int id, const char *step, unsigned int 
     wine_nx_runtime_trace( line );
 }
 extern int wine_nx_electron_probe_active(void) __attribute__((weak));
+static BOOL probe_image_path(const UNICODE_STRING *image)
+{
+    const char path[] = "C:\\ElectronProbe-10.1.5\\ElectronProbe.exe";
+    const WCHAR *name = image->Buffer;
+    unsigned count = image->Length / sizeof(*name);
+    if (count >= 4 && name[0] == '\\' && name[1] == '?' && name[2] == '?' && name[3] == '\\') {
+        count -= 4;
+        name += 4;
+    }
+    if (count != sizeof(path)-1) return FALSE;
+    for (unsigned i = 0; i < count; ++i)
+        if (name[i] > 127 || tolower((unsigned char)name[i]) != tolower((unsigned char)path[i])) return FALSE;
+    return TRUE;
+}
 static void trace_child_step( unsigned int id, const char *step )
 {
     char line[128];
@@ -1058,6 +1072,19 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     /* create the child process */
 
     CHILD_STEP("spawn");
+#ifdef __SWITCH__
+    extern int wine_nx_renderer_probe_selected(void);
+    extern int probe_spawn_renderer(const uint16_t *, unsigned, unsigned, unsigned, unsigned, const uintptr_t *, size_t, int *);
+    int probe_result = -1;
+    if (wine_nx_renderer_probe_selected() && (process_flags & PROCESS_CREATE_FLAGS_INHERIT_HANDLES) &&
+        probe_image_path(&params->ImagePathName))
+        probe_result = probe_spawn_renderer(params->CommandLine.Buffer, params->CommandLine.Length / sizeof(WCHAR),
+                         process_id, thread_id, wine_server_obj_handle(process_info),
+                         handles_attr ? handles_attr->ValuePtr : NULL,
+                         handles_attr ? handles_attr->Size / sizeof(HANDLE) : 0, &host_pid);
+    if (probe_result >= 0) status = probe_result ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+    else
+#endif
     status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info, &host_pid );
 #ifdef __SWITCH__
     spawn_called = TRUE;
@@ -1396,6 +1423,10 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                     pbi.UniqueProcessId = current_teb ?
                         (ULONG_PTR)current_teb->ClientId.UniqueProcess : 0;
                     pbi.InheritedFromUniqueProcessId = 0;
+                    if (handle != GetCurrentProcess()) {
+                        extern int horizon_probe_query_child(unsigned, PROCESS_BASIC_INFORMATION *);
+                        horizon_probe_query_child(wine_server_obj_handle(handle), &pbi);
+                    }
                     ret = STATUS_SUCCESS;
 #else
                     SERVER_START_REQ(get_process_info)

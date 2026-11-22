@@ -1,5 +1,33 @@
 #include <switch.h>
 #include <string.h>
+#ifdef CORKDECK_RENDERER_LOADER
+#include <stdio.h>
+/* fsdev and the C heap are not available in the loader. */
+static void loaderNote(const char *stage, Result rc, u64 value) {
+    FsFileSystem fs;
+    FsFile file;
+    const char *path = "/switch/wine/logs/ElectronProbe-loader.log";
+    char line[180];
+    s64 offset = 0;
+    u64 pid = 0;
+    svcGetProcessId(&pid, CUR_PROCESS_HANDLE);
+    int len = snprintf(line, sizeof(line), "pid=%llu stage=%s rc=0x%x value=%llu\n", pid, stage, rc, value);
+    if (len <= 0 || len >= sizeof(line) || !serviceIsActive(fsGetServiceSession()) || R_FAILED(fsOpenSdCardFileSystem(&fs))) return;
+    fsFsCreateFile(&fs, path, 0, 0);
+    if (R_SUCCEEDED(fsFsOpenFile(&fs, path, FsOpenMode_Write | FsOpenMode_Append, &file))) {
+        if (R_SUCCEEDED(fsFileGetSize(&file, &offset)))
+            fsFileWrite(&file, offset, line, len, FsWriteOption_Flush);
+        fsFileClose(&file);
+    }
+    fsFsClose(&fs);
+}
+static void NX_NORETURN loaderFail(Result rc) {
+    loaderNote("loader-exit", rc, 0);
+    svcExitProcess();
+    __builtin_unreachable();
+}
+#define diagAbortWithResult(rc) loaderFail(rc)
+#endif
 #include "../../source/low_window.h"
 
 #define EXIT_DETECTION_STR "if this isn't replaced i will exit :)"
@@ -114,26 +142,43 @@ fail0:
 }
 
 static u64 calculateMaxHeapSize(void) {
-    u64 size = 0;
-    u64 mem_available = 0, mem_used = 0;
-
-    svcGetInfo(&mem_available, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
-    svcGetInfo(&mem_used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
-
-    if (mem_available > mem_used+0x200000)
-        size = (mem_available - mem_used - 0x200000) & ~0x1FFFFF;
-    if (size == 0)
-        size = 0x2000000*16;
-    if (size > 0x6000000)
-        size -= 0x6000000;
-
-    return size;
+    const u64 alignment = 2ULL << 20, reserve = 96ULL << 20;
+    u64 total = 0, used = 0;
+    Result total_rc = svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+    Result used_rc = svcGetInfo(&used, InfoType_UsedMemorySize, CUR_PROCESS_HANDLE, 0);
+    u64 available = total > used ? total - used : 0;
+    u64 aligned = available > alignment ? (available - alignment) & ~(alignment - 1) : 0;
+#ifdef CORKDECK_RENDERER_LOADER
+    loaderNote("memory-total-bytes", total_rc, total);
+    loaderNote("memory-used-bytes", used_rc, used);
+    if (R_FAILED(total_rc)) loaderFail(total_rc);
+    if (R_FAILED(used_rc)) loaderFail(used_rc);
+    loaderNote("heap-before-reserve-bytes", 0, aligned);
+    loaderNote("heap-with-legacy-96m-reserve-bytes", 0, aligned > reserve ? aligned - reserve : aligned);
+    /* The headless worker loads the runtime in its heap. Keep the 2 MiB
+     * margin above, but do not take the foreground loader's extra reserve. */
+    const u64 cap = 256ULL << 20;
+    return aligned > cap ? cap : aligned;
+#else
+    (void)total_rc;
+    (void)used_rc;
+    if (!aligned) aligned = 512ULL << 20;
+    return aligned > reserve ? aligned - reserve : aligned;
+#endif
 }
 
 static void setupHbHeap(void) {
     void* addr = NULL;
     u64 size = calculateMaxHeapSize();
+#ifdef CORKDECK_RENDERER_LOADER
+    loaderNote("heap-request-bytes", 0, size);
+    if (!size) loaderFail(MAKERESULT(Module_HomebrewLoader, 9));
+#endif
     Result rc = svcSetHeapSize(&addr, size);
+#ifdef CORKDECK_RENDERER_LOADER
+    loaderNote("heap-granted-bytes", rc, R_SUCCEEDED(rc) && addr ? size : 0);
+    if (R_FAILED(rc)) loaderFail(rc);
+#endif
 
     if (R_FAILED(rc) || addr==NULL)
         diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 9));
@@ -323,6 +368,9 @@ void NX_NORETURN loadNro(void) {
 
     // check's if the homebrew replaced nro_path.
     // if so, load new nro, otherwise, exit.
+#ifdef CORKDECK_RENDERER_LOADER
+    if (g_nroSize) svcExitProcess();
+#endif
     if (!strcmp(g_nextArgv, EXIT_DETECTION_STR)) {
         if (!strcmp(g_nextNroPath, g_defaultNroPath)) {
             selfExit();
@@ -366,6 +414,11 @@ void NX_NORETURN loadNro(void) {
 
         g_nroAddr = g_nroSize = 0;
     } else {
+#ifdef CORKDECK_RENDERER_LOADER
+        strcpy(g_nextNroPath, "sdmc:/switch/wine/wine-nx-runtime.nro");
+        strcpy(g_nextArgv, g_nextNroPath);
+        strcpy(g_defaultNroPath, g_nextNroPath);
+#else
         // otherwise, this is the first time launching, read path / argv from romfs
         FsStorage s;
         romfs_header romfs_header;
@@ -425,6 +478,7 @@ void NX_NORETURN loadNro(void) {
             strcpy(g_defaultArgv, g_nextArgv);
         }
 
+#endif
     }
 
     {
@@ -457,9 +511,15 @@ void NX_NORETURN loadNro(void) {
             diagAbortWithResult(rc);
         if (file_size < sizeof(checked_header))
             diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 6));
-        if (!readNroFile(&file, 0, checked_header, sizeof(checked_header)) ||
-            !nroImageSize(checked_header, file_size, g_heapSize, &image_size))
+        if (!readNroFile(&file, 0, checked_header, sizeof(checked_header)))
             diagAbortWithResult(R_FAILED(file.error) ? file.error : MAKERESULT(Module_HomebrewLoader, 6));
+#ifdef CORKDECK_RENDERER_LOADER
+        const u64 bss_bytes = nroU32(checked_header + 0x38);
+        loaderNote("nro-image-and-bss-bytes", 0,
+                   nroU32(checked_header + 0x18) + ((bss_bytes + 0xfff) & ~UINT64_C(0xfff)));
+#endif
+        if (!nroImageSize(checked_header, file_size, g_heapSize, &image_size))
+            diagAbortWithResult(MAKERESULT(Module_HomebrewLoader, 6));
         if (!readNroFile(&file, 0, start, image_size))
             diagAbortWithResult(R_FAILED(file.error) ? file.error : MAKERESULT(Module_HomebrewLoader, 6));
         if (memcmp(start, checked_header, sizeof(checked_header)))
@@ -549,6 +609,10 @@ void NX_NORETURN loadNro(void) {
         entry_Syscalls->Value[0x4C/64] &= ~(1UL << (0x4C%64)); // svcControlCodeMemory
     }
 
+#ifdef CORKDECK_RENDERER_LOADER
+    entries[2].Value[0] = AppletType_None;
+    entries[2].Value[1] = 0;
+#endif
     // MainThreadHandle
     entries[0].Value[0] = envGetMainThreadHandle();
     // ProcessHandle
@@ -581,12 +645,18 @@ void NX_NORETURN loadNro(void) {
     if (R_FAILED(rc = restoreMainThreadAffinity()))
         diagAbortWithResult(rc);
 
+#ifdef CORKDECK_RENDERER_LOADER
+    loaderNote("enter-runtime", 0, nro_heap_size);
+#endif
     // jump to trampoline.s
     nroEntrypointTrampoline(&entries[0], -1, g_nroAddr);
 }
 
 int main(int argc, char **argv) {
     memcpy(g_savedTls, (const u8*)armGetTls() + 0x100, 0x100);
+#ifdef CORKDECK_RENDERER_LOADER
+    loaderNote("entry", 0, 0);
+#endif
     setupHbHeap();
     getOwnProcessHandle();
     getCodeMemoryCapability();

@@ -52,6 +52,7 @@
 #include "std_stream_lines.h"
 #include "thread_profile.h"
 #include "electron_probe.h"
+#include "probe_renderer.h"
 #include "performance.h"
 #include "dxvk_releases.h"
 #include "horizon_dlls.h"
@@ -313,7 +314,8 @@ static char startup_note[APP_SESSION_NOTE];
 static int habl_diagnostics, habl_fatal_seen, habl_exception_seen[2];
 static unsigned int habl_children, habl_child_returns, habl_reads, habl_writes;
 
-static int electron_probe;
+static int electron_probe, probe_parent, probe_worker;
+int wine_nx_renderer_probe_selected(void) { return probe_parent; }
 
 int wine_nx_electron_probe_active(void)
 {
@@ -1701,6 +1703,7 @@ static int call_pe_entry_point( void *entry )
 
 static void park_forever(void)
 {
+    if (probe_worker) svcExitProcess();
     log_line( "[EXIT] parked after runtime handoff; close from HOME" );
     for (;;) svcSleepThread( 1000000000LL );
 }
@@ -2605,7 +2608,8 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
 
     if (!launcher_command_line( dos_path, "", cmdline, sizeof(cmdline) )) return NULL;
     cmdline_str = cmdline;
-    if (chain_args[0] && !strcmp( target, chain_target ) &&
+    if (probe_worker) cmdline_str = "";
+    else if (chain_args[0] && !strcmp( target, chain_target ) &&
         launcher_command_line( dos_path, chain_args, cmdline, sizeof(cmdline) ))
         log_line( "[ARGS] from the program that started this one; CommandLine='%s'", cmdline_str );
     else if (target[1] != ':' && launcher_args_path( target, args_path, sizeof(args_path) ) &&
@@ -2629,7 +2633,7 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     chars = strlen( current_dir ) + 1;
     chars += strlen( dll_path ) + 1;
     chars += strlen( dos_path ) + 1;
-    chars += strlen( cmdline_str ) + 1;
+    chars += (probe_worker ? probe_child.units : strlen( cmdline_str )) + 1;
     chars += strlen( dos_path ) + 1;
     chars += strlen( nt_path ) + 1;
     chars += sizeof(runtime_environment) + 2 * strlen( graphics_path ) + strlen( dxvk_hud ) - 1;
@@ -2651,7 +2655,14 @@ static RTL_USER_PROCESS_PARAMETERS *runtime_create_process_params( const char *t
     put_process_string( &cursor, &params->CurrentDirectory.DosPath, current_dir );
     put_process_string( &cursor, &params->DllPath, dll_path );
     put_process_string( &cursor, &params->ImagePathName, dos_path );
-    put_process_string( &cursor, &params->CommandLine, cmdline_str );
+    if (probe_worker) {
+        params->CommandLine.Buffer = cursor;
+        params->CommandLine.Length = probe_child.units * sizeof(WCHAR);
+        params->CommandLine.MaximumLength = params->CommandLine.Length + sizeof(WCHAR);
+        memcpy(cursor, probe_child.command, params->CommandLine.Length);
+        cursor += probe_child.units;
+        *cursor++ = 0;
+    } else put_process_string( &cursor, &params->CommandLine, cmdline_str );
     put_process_string( &cursor, &params->WindowTitle, dos_path );
     put_process_string( &cursor, main_nt_name, nt_path );
     params->Environment = cursor;
@@ -4369,6 +4380,7 @@ static int return_to_launcher( void )
 {
     int i, still_lent = 0;
 
+    if (probe_worker) svcExitProcess();
     lan_log_stop(); /* Join diagnostics before runtime teardown and loader restart. */
     wine_nx_perf_stop();
     int showing_error = __atomic_load_n( &startup_visible, __ATOMIC_ACQUIRE ) && startup_refresh_panel();
@@ -5055,6 +5067,27 @@ int main( int argc, char **argv )
     else snprintf( own_nro, sizeof(own_nro), "%s", WINE_NX_RUNTIME_NRO );
     /* Before the console, whose framebuffer is lent to the graphics driver:
      * what is lent now is the loader's, and everything after it is ours. */
+    if (runtime_title_id() == PROBE_PROGRAM_ID) {
+        probe_worker = 1;
+        wine_nx_console_active = 0;
+        log_file = fopen(RUNTIME_LOGS "/ElectronProbe-worker.log", "w");
+        if (!log_file) return 1;
+        setvbuf(log_file, NULL, _IONBF, 0);
+        log_line("[EPROBE] worker entered program=%016llx", runtime_title_id());
+        wine_nx_runtime_platform_init();
+        if (!probe_worker_connect()) {
+            log_line("[EPROBE] bootstrap failed errno=%d", errno);
+            return 1;
+        }
+        strcpy(target, PROBE_IMAGE);
+        strcpy(chain_target, target);
+        autorun = runtime_fex = 1;
+        electron_probe = habl_diagnostics = 1;
+        low_window_available = wine_nx_low_window_probe(log_line_plain);
+        if (setjmp(quit_jump)) svcExitProcess();
+        quit_jump_ready = 1;
+        goto load_probe_target;
+    }
     note_loader_lent_memory();
     consoleInit( NULL );
     /* One empty frame, so the screen is this program's and blank from the start
@@ -5526,6 +5559,10 @@ int main( int argc, char **argv )
     snprintf( chain_target, sizeof(chain_target), "%s", target );
     if (chain_owner[0]) log_line( "[CHAIN] started by %s (step %u), with its settings", chain_owner, chain_depth );
 
+    probe_parent = !strcasecmp(target, PROBE_IMAGE);
+    if (electron_probe) log_line("[EPROBE] independent renderer enabled=%d program=%016llx", probe_parent,
+                                 (unsigned long long)PROBE_PROGRAM_ID);
+load_probe_target:
     status = runtime_target_machine( target, &target_machine );
     if (status || (status = horizon_set_process_machine( target_machine )))
     {
@@ -5700,7 +5737,7 @@ int main( int argc, char **argv )
         }
         runtime_init_peb_process( teb, module, params );
         log_line( "[PEB] image=%s nt=\\??\\%s", dos_path, dos_path );
-        runtime_apply_install_script( target );
+        if (!probe_worker) runtime_apply_install_script( target );
         if (target_machine == IMAGE_FILE_MACHINE_I386) runtime_prepare_legacy_steam( target );
 
 #ifdef WINE_NX_AMD64
@@ -5718,6 +5755,11 @@ int main( int argc, char **argv )
                 svcSetThreadPriority( CUR_THREAD_HANDLE, 0x3b );
                 wine_nx_thread_register( 'w', HandleToULong( teb->ClientId.UniqueThread ), teb );
                 startup_set( STARTUP_GUEST );
+                if (probe_worker && !probe_worker_enter(HandleToULong(teb->ClientId.UniqueProcess),
+                                                        HandleToULong(teb->ClientId.UniqueThread), (uintptr_t)teb->Peb)) {
+                    log_line("[EPROBE] renderer start gate failed errno=%d", errno);
+                    svcExitProcess();
+                }
                 wine_nx_start_arm64ec_thread( (PRTL_THREAD_START_ROUTINE)entry, teb->Peb, suspend, teb );
             }
             park_forever();
