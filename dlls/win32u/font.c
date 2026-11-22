@@ -60,6 +60,17 @@ WINE_DEFAULT_DEBUG_CHANNEL(font);
 extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
 extern int wine_nx_runtime_verbose __attribute__((weak));
 
+extern int wine_nx_electron_probe_active(void) __attribute__((weak));
+
+static void probe_font_selection(const WCHAR *request, const WCHAR *face, const WCHAR *file, const char *result)
+{
+    char line[512];
+    if (!wine_nx_electron_probe_active || !wine_nx_electron_probe_active() || !wine_nx_runtime_trace) return;
+    snprintf(line, sizeof(line), "[EPROBE] font backend=GDI request=%s selected=%s file=%s open=%s",
+             debugstr_w(request), debugstr_w(face), debugstr_w(file), result);
+    wine_nx_runtime_trace(line);
+}
+
 static BOOL nxfont_trace_enabled(void)
 {
     return &wine_nx_runtime_trace && &wine_nx_runtime_verbose && wine_nx_runtime_verbose;
@@ -4542,6 +4553,7 @@ static struct gdi_font *select_font( LOGFONTW *lf, FMAT2 dcmat, BOOL can_use_bit
     {
         FIXME( "can't find a single appropriate font - bailing\n" );
 #ifdef __SWITCH__
+        probe_font_selection(lf->lfFaceName, NULL, NULL, "no-match");
         nxfont_trace_wpath( "select_failed", lf->lfFaceName, lf->lfCharSet, 0 );
 #endif
         return NULL;
@@ -4607,11 +4619,16 @@ static struct gdi_font *select_font( LOGFONTW *lf, FMAT2 dcmat, BOOL can_use_bit
     if (!font_funcs->load_font( font ))
     {
 #ifdef __SWITCH__
+        probe_font_selection(lf->lfFaceName, face->full_name, face->file, "failed");
         nxfont_trace_wpath( "select_load_failed", face->file, lf->lfCharSet, face->fs.fsCsb[0] );
 #endif
         free_gdi_font( font );
         return NULL;
     }
+
+#ifdef __SWITCH__
+    probe_font_selection(lf->lfFaceName, face->full_name, face->file, "ok");
+#endif
 
     if (face->flags & ADDFONT_VERTICAL_FONT) /* We need to try to load the GSUB table */
         font->vert_feature = get_GSUB_vert_feature( font );

@@ -4001,6 +4001,12 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
     prefix[prefix_len] = 0;
 
 #ifdef __SWITCH__
+    /* NPFS endpoints live in the in-process server, including on SD cards
+     * where looking up a nonexistent dosdevices entry may fail differently. */
+    static const WCHAR pipeW[] = {'p','i','p','e'};
+    if (prefix_len == ARRAY_SIZE(pipeW) && name_len > prefix_len &&
+        !memcmp( prefix, pipeW, sizeof(pipeW) )) return STATUS_BAD_DEVICE_TYPE;
+
     if (is_unix && name_len > prefix_len + 1 && (name[prefix_len] == '/' || name[prefix_len] == '\\'))
     {
         static const WCHAR sdmcW[] = {'s','d','m','c',':'};
@@ -5092,6 +5098,26 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
     }
 
  done:
+#ifdef __SWITCH__
+    {
+        extern int wine_nx_electron_probe_active(void) __attribute__((weak));
+        extern void wine_nx_runtime_trace(const char *) __attribute__((weak));
+        if (wine_nx_electron_probe_active && wine_nx_electron_probe_active() && wine_nx_runtime_trace)
+        {
+            const UNICODE_STRING *name = attr->ObjectName;
+            size_t length = name->Length / sizeof(WCHAR);
+            const WCHAR *ext = length >= 4 ? &name->Buffer[length - 4] : NULL;
+            if (ext && (!wcsnicmp(ext, u".ttf", 4) || !wcsnicmp(ext, u".otf", 4) ||
+                        !wcsnicmp(ext, u".ttc", 4) || !wcsnicmp(ext, u".fon", 4)))
+            {
+                char line[512];
+                snprintf(line, sizeof(line), "[EPROBE] font NtCreateFile name=%s access=%08x status=%08x",
+                         debugstr_us(name), (unsigned int)access, status);
+                wine_nx_runtime_trace(line);
+            }
+        }
+    }
+#endif
     free( unix_name );
     free( nt_name.Buffer );
     return io->Status = status;
@@ -5894,6 +5920,22 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
  *                  Asynchronous file I/O                              *
  */
 
+#ifdef __SWITCH__
+static void trace_mojo_io( unsigned int server, HANDLE handle, int writing, const char *phase,
+                           unsigned int requested, unsigned int transferred, unsigned int status )
+{
+    extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+    char line[256];
+    if (!server || !wine_nx_runtime_trace) return;
+    int n = snprintf( line, sizeof(line), "[MOJO] api=Nt%sFile first_io=1 phase=%s server=%#x handle=%p tid=%p "
+                      "requested=%u", writing ? "Write" : "Read", phase, server, handle,
+                      NtCurrentTeb()->ClientId.UniqueThread, requested );
+    if (n > 0 && (size_t)n < sizeof(line) && strcmp( phase, "begin" ))
+        snprintf( line + n, sizeof(line) - n, " transferred=%u ntstatus=0x%08x", transferred, status );
+    wine_nx_runtime_trace( line );
+}
+#endif
+
 struct async_fileio_read
 {
     struct async_fileio io;
@@ -5901,6 +5943,7 @@ struct async_fileio_read
     char               *buffer;
     unsigned int        already;
     unsigned int        count;
+    unsigned int        mojo_server;
     BOOL                avail_mode;
 };
 
@@ -5911,6 +5954,7 @@ struct async_fileio_write
     const char         *buffer;
     unsigned int        already;
     unsigned int        count;
+    unsigned int        mojo_server;
 };
 
 struct async_fileio_read_changes
@@ -6023,6 +6067,10 @@ static BOOL async_read_proc( void *user, ULONG_PTR *info, unsigned int *status )
         break;
     }
 
+#ifdef __SWITCH__
+    if (fileio->mojo_server)
+        trace_mojo_io( fileio->mojo_server, fileio->handle, 0, "completion", fileio->count, fileio->already, *status );
+#endif
     *info = fileio->already;
     release_fileio( &fileio->io );
     return TRUE;
@@ -6065,6 +6113,10 @@ static BOOL async_write_proc( void *user, ULONG_PTR *info, unsigned int *status 
         break;
     }
 
+#ifdef __SWITCH__
+    if (fileio->mojo_server)
+        trace_mojo_io( fileio->mojo_server, fileio->handle, 1, "completion", fileio->count, fileio->already, *status );
+#endif
     *info = fileio->already;
     release_fileio( &fileio->io );
     return TRUE;
@@ -6354,7 +6406,7 @@ static NTSTATUS get_io_avail_mode( HANDLE handle, enum server_fd_type type, BOOL
 static unsigned int register_async_file_read( HANDLE handle, HANDLE event,
                                               PIO_APC_ROUTINE apc, void *apc_user,
                                               client_ptr_t iosb, void *buffer,
-                                              ULONG already, ULONG length, BOOL avail_mode )
+                                              ULONG already, ULONG length, BOOL avail_mode, unsigned int mojo_server )
 {
     struct async_fileio_read *fileio;
     unsigned int status;
@@ -6367,6 +6419,7 @@ static unsigned int register_async_file_read( HANDLE handle, HANDLE event,
     fileio->count = length;
     fileio->buffer = buffer;
     fileio->avail_mode = avail_mode;
+    fileio->mojo_server = mojo_server;
 
     SERVER_START_REQ( register_async )
     {
@@ -6474,6 +6527,7 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
     struct io_timeouts timeouts;
     unsigned int status, ret_status;
     UINT total = 0;
+    unsigned int mojo_server = 0;
     client_ptr_t iosb_ptr = iosb_client_ptr(io);
     enum server_fd_type type;
     ULONG_PTR cvalue = apc ? 0 : (ULONG_PTR)apc_user;
@@ -6489,8 +6543,22 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
 
     status = server_get_unix_fd( handle, FILE_READ_DATA, &unix_handle, &needs_close, &type, &options );
     if (status && status != STATUS_BAD_DEVICE_TYPE) return status;
+#ifdef __SWITCH__
+    if (!status && type == FD_TYPE_CHAR)
+    {
+        mojo_server = horizon_mojo_first_io( unix_handle, 0 );
+        if (mojo_server) trace_mojo_io( mojo_server, handle, 0, "begin", length, 0, 0 );
+    }
+#endif
 
-    if (!virtual_check_buffer_for_write( buffer, length )) return STATUS_ACCESS_VIOLATION;
+
+    if (!virtual_check_buffer_for_write( buffer, length ))
+    {
+#ifdef __SWITCH__
+        if (mojo_server) trace_mojo_io( mojo_server, handle, 0, "return", length, 0, STATUS_ACCESS_VIOLATION );
+#endif
+        return STATUS_ACCESS_VIOLATION;
+    }
 
     if (status == STATUS_BAD_DEVICE_TYPE)
         return server_read_file( handle, event, apc, apc_user, io, buffer, length, offset, key );
@@ -6556,7 +6624,7 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
         if (timeouts.interval > 0)
         {
             status = register_async_file_read( handle, event, apc, apc_user, iosb_ptr,
-                                               buffer, total, length, FALSE );
+                                               buffer, total, length, FALSE, 0 );
             goto err;
         }
     }
@@ -6612,7 +6680,7 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
                 goto done;
             }
             status = register_async_file_read( handle, event, apc, apc_user, iosb_ptr,
-                                               buffer, total, length, avail_mode );
+                                               buffer, total, length, avail_mode, mojo_server );
             goto err;
         }
         else  /* synchronous read, wait for the fd to become ready */
@@ -6696,6 +6764,9 @@ err:
 
     if (send_completion && async_read)
         add_completion( handle, cvalue, status, total, ret_status == STATUS_PENDING );
+#ifdef __SWITCH__
+    if (mojo_server) trace_mojo_io( mojo_server, handle, 0, "return", length, total, ret_status );
+#endif
     return ret_status;
 }
 
@@ -6788,6 +6859,7 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
     struct io_timeouts timeouts;
     unsigned int status, ret_status;
     UINT total = 0;
+    unsigned int mojo_server = 0;
     client_ptr_t iosb_ptr = iosb_client_ptr(io);
     enum server_fd_type type;
     ULONG_PTR cvalue = apc ? 0 : (ULONG_PTR)apc_user;
@@ -6807,6 +6879,14 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
         append_write = TRUE;
     }
     if (status && status != STATUS_BAD_DEVICE_TYPE) return status;
+#ifdef __SWITCH__
+    if (!status && type == FD_TYPE_CHAR)
+    {
+        mojo_server = horizon_mojo_first_io( unix_handle, 1 );
+        if (mojo_server) trace_mojo_io( mojo_server, handle, 1, "begin", length, 0, 0 );
+    }
+#endif
+
 
     async_write = !(options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT));
 
@@ -6928,6 +7008,7 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
             fileio->handle = handle;
             fileio->already = total;
             fileio->count = length;
+            fileio->mojo_server = mojo_server;
             fileio->buffer = buffer;
 
             SERVER_START_REQ( register_async )
@@ -7003,6 +7084,9 @@ err:
     ret_status = async_write && type == FD_TYPE_FILE && status == STATUS_SUCCESS ? STATUS_PENDING : status;
     if (send_completion && async_write)
         add_completion( handle, cvalue, status, total, ret_status == STATUS_PENDING );
+#ifdef __SWITCH__
+    if (mojo_server) trace_mojo_io( mojo_server, handle, 1, "return", length, total, ret_status );
+#endif
     return ret_status;
 }
 
@@ -7204,7 +7288,7 @@ static void ignore_server_ioctl_struct_holes( ULONG code, const void *in_buffer,
 /******************************************************************************
  *              NtFsControlFile   (NTDLL.@)
  */
-NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_context,
+static NTSTATUS fs_control_file( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_context,
                                  IO_STATUS_BLOCK *io, ULONG code, void *in_buffer, ULONG in_size,
                                  void *out_buffer, ULONG out_size )
 {
@@ -7301,6 +7385,32 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
 
     if (!NT_ERROR(status) && status != STATUS_PENDING)
         file_complete_async( handle, options, event, apc, apc_context, io, status, size );
+    return status;
+}
+
+NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_context,
+                                 IO_STATUS_BLOCK *io, ULONG code, void *in_buffer, ULONG in_size,
+                                 void *out_buffer, ULONG out_size )
+{
+    NTSTATUS status = fs_control_file( handle, event, apc, apc_context, io, code, in_buffer, in_size, out_buffer, out_size );
+#ifdef __SWITCH__
+    /* The handle is the server endpoint returned by NtCreateNamedPipeFile. */
+    if (code == FSCTL_PIPE_LISTEN)
+    {
+        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+        if (wine_nx_runtime_trace)
+        {
+            char line[320];
+            snprintf( line, sizeof(line), "[MOJO] api=ConnectNamedPipe nt=NtFsControlFile tid=%p handle=%p "
+                      "event=%p context=%p control=%#x in_bytes=%u out_bytes=%u ntstatus=0x%08x%s",
+                      NtCurrentTeb()->ClientId.UniqueThread, handle, event, apc_context, (unsigned int)code,
+                      (unsigned int)in_size, (unsigned int)out_size, (unsigned int)status,
+                      status == STATUS_PIPE_CONNECTED ? " mapped_win32_error=0x217 already_connected=1" :
+                      status == STATUS_INVALID_PARAMETER ? " mapped_win32_error=0x57" : "" );
+            wine_nx_runtime_trace( line );
+        }
+    }
+#endif
     return status;
 }
 

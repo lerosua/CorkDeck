@@ -304,6 +304,10 @@ static unsigned int horizon_registry_init(void)
             "[System\\\\CurrentControlSet\\\\Services\\\\Tcpip\\\\Parameters]\n"
             "\"Hostname\"=\"wine-nx\"\n"
             "\"Domain\"=\"\"\n"
+            /* DirectWrite enumerates this key, even when GDI already knows the files. */
+            "[Software\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\Fonts]\n"
+            "\"Tahoma (TrueType)\"=\"tahoma.ttf\"\n"
+            "\"Tahoma Bold (TrueType)\"=\"tahomabd.ttf\"\n"
             "[Software\\\\Microsoft\\\\Windows NT\\\\CurrentVersion\\\\ProfileList]\n"
             "\"ProfilesDirectory\"=\"C:\\\\users\"\n"
             "[Software\\\\Classes\\\\CLSID\\\\{BCDE0395-E52F-467C-8E3D-C4579291692E}\\\\InprocServer32]\n"
@@ -317,7 +321,10 @@ static unsigned int horizon_registry_init(void)
             "[System\\\\CurrentControlSet\\\\Control\\\\Session Manager\\\\Memory Management]\n"
             "\"PagingFiles\"=\"C:\\\\pagefile.sys 27 77\"\n";
         static const char user_seed[] =
-            "WINE REGISTRY Version 2\n[Software\\\\Wine\\\\Drivers]\n\"Audio\"=\"nxaudio\"\n";
+            "WINE REGISTRY Version 2\n[Software\\\\Wine\\\\Drivers]\n\"Audio\"=\"nxaudio\"\n"
+            "[Software\\\\Wine\\\\Fonts\\\\Replacements]\n"
+            "\"MS Shell Dlg\"=str(7):\"SimSun\\0Tahoma\\0\"\n"
+            "\"sans\"=\"Tahoma\"\n";
         unsigned int errors = 0;
         if (horizon_reg_load( &horizon_registry, machine, machine_seed, sizeof(machine_seed) - 1, &errors ) ||
             horizon_reg_load( &horizon_registry, user, user_seed, sizeof(user_seed) - 1, &errors ) || errors)

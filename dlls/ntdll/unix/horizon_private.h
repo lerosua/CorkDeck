@@ -50,6 +50,8 @@ extern void horizon_pin_current_thread( ULONG_PTR requested_mask );
 extern void *horizon_anon_mmap_fixed( void *start, size_t size, int prot, int flags );
 extern void *horizon_anon_mmap_alloc( size_t size, int prot );
 extern int horizon_pipe( int fd[2] );
+extern void horizon_abort_child_startup( unsigned int process, unsigned int thread, unsigned int status );
+extern int horizon_process_socketpair( int fd[2] );
 extern void horizon_server_queue_fd( int fd, unsigned int handle );
 extern int horizon_server_take_client_fd( unsigned int *handle );
 extern unsigned int horizon_server_protocol_version(void);
@@ -67,6 +69,14 @@ extern void horizon_futex_wake( const int *addr, int count );
 extern unsigned long long horizon_interrupt_time(void);
 extern void wine_nx_start_user_shared_data_clock(void);
 extern void horizon_mark_std_stream( HANDLE handle, int stream );
+extern int wine_nx_habl_diagnostics(void) __attribute__((weak));
+static inline int horizon_habl_tracing(void)
+{
+    return wine_nx_habl_diagnostics && wine_nx_habl_diagnostics();
+}
+extern void wine_nx_habl_exception( unsigned int code, unsigned int flags, const void *address,
+                                    unsigned int tid, int first_chance ) __attribute__((weak));
+extern unsigned int horizon_mojo_first_io( int fd, int writing );
 extern void horizon_echo_std_write( HANDLE handle, const void *data, size_t size );
 struct stat;
 extern int horizon_stat_open_file( const char *path, struct stat *st );

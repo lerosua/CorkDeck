@@ -444,6 +444,10 @@ struct horizon_pipe
 struct horizon_pipe_file
 {
     struct horizon_pipe *pipe;
+    struct horizon_pipe *reverse; /* Duplex endpoints read and write separate rings. */
+    unsigned int mojo_server, mojo_io_seen;
+    int stream_eof; /* A closed process channel reads as EOF; a Windows named pipe reports EPIPE. */
+    int async;
     int write_end;
 };
 
@@ -514,6 +518,7 @@ struct horizon_fd_queue
 #define HORIZON_REQ_SET_FD_NAME_INFO 274
 #define HORIZON_REQ_SET_FD_EOF_INFO 275
 #define HORIZON_REQ_SET_ASYNC_DIRECT_RESULT 135
+#define HORIZON_REQ_REGISTER_ASYNC 132
 #define HORIZON_REQ_CANCEL_ASYNC 133
 #define HORIZON_REQ_GET_ASYNC_RESULT 134
 #define HORIZON_REQ_IOCTL 138
@@ -668,6 +673,9 @@ struct horizon_fd_queue
 #define HORIZON_STATUS_SHARING_VIOLATION 0xc0000043u
 #define HORIZON_STATUS_INSTANCE_NOT_AVAILABLE 0xc00000abu
 #define HORIZON_STATUS_PIPE_NOT_AVAILABLE 0xc00000acu
+#define HORIZON_STATUS_PIPE_CONNECTED 0xc00000b2u
+#define HORIZON_STATUS_PIPE_BROKEN 0xc000014bu
+#define HORIZON_FSCTL_PIPE_LISTEN 0x00110008u
 #define HORIZON_STATUS_PIPE_DISCONNECTED 0xc00000b0u
 #define HORIZON_STATUS_NOT_IMPLEMENTED 0xc0000002u
 #define HORIZON_STATUS_INVALID_HANDLE 0xc0000008u
@@ -904,7 +912,8 @@ enum horizon_server_object_type
     HORIZON_SERVER_OBJECT_COMPLETION_WAIT,
     HORIZON_SERVER_OBJECT_NAMED_PIPE,
     HORIZON_SERVER_OBJECT_NSI,
-    HORIZON_SERVER_OBJECT_TOKEN
+    HORIZON_SERVER_OBJECT_TOKEN,
+    HORIZON_SERVER_OBJECT_STARTUP_INFO
 };
 
 struct horizon_ratio
@@ -1528,6 +1537,16 @@ struct horizon_async_data
     unsigned long long apc_context;
 };
 
+struct horizon_register_async_request
+{
+    struct horizon_server_request_header header;
+    int type;
+    struct horizon_async_data async;
+    int count;
+    char __pad_60[4];
+};
+C_ASSERT( sizeof(struct horizon_register_async_request) == 64 );
+
 struct horizon_recv_socket_request
 {
     struct horizon_server_request_header header;
@@ -1623,6 +1642,8 @@ static unsigned int horizon_async_apc_ids;
 #define HORIZON_ASYNC_STALE 200000ULL  /* 20 ms */
 
 struct horizon_server_connection;
+struct horizon_server_object;
+static unsigned int horizon_server_find_io_object_locked( unsigned int handle, struct horizon_server_object **object );
 static struct horizon_async *horizon_server_async_create_locked( struct horizon_server_connection *connection,
                                                                  const struct horizon_async_data *data,
                                                                  int direction, int kind );
@@ -1631,7 +1652,7 @@ static void horizon_async_finish_locked( struct horizon_async *async, unsigned i
                                          unsigned long long total );
 static unsigned long long horizon_async_now(void);
 static void horizon_report_async( const char *what, const struct horizon_async *async, unsigned int status );
-static void horizon_sock_poller_start(void);
+static int horizon_sock_poller_start(void);
 /* The client's cached copy of a socket's fd, which accepting into the socket
  * replaces (server.c). */
 extern void horizon_client_forget_fd( unsigned int handle );
@@ -3276,6 +3297,16 @@ struct horizon_user_apc
     unsigned char call[1];
 };
 
+/* Kept only for the lifetime of the startup transaction. The info object owns
+ * the request bytes and channel; the process holds a reference to that object. */
+struct horizon_child_startup
+{
+    unsigned int pid, initial_tid, parent_pid;
+    uintptr_t child_peb;
+    unsigned int status, info_offset, info_size, size;
+    unsigned char data[];
+};
+
 struct horizon_server_object
 {
     unsigned int id;
@@ -3353,6 +3384,8 @@ struct horizon_server_object
     unsigned int file_completion_flags;  /* FILE_SKIP_* */
     struct horizon_memfile *mapping_memfile; /* mapping: a section with no file, kept by file_fd */
     struct horizon_server_object *mapping_shared_file;
+    struct horizon_server_object *startup_info;
+    struct horizon_child_startup *child_startup;
 };
 
 struct horizon_server_handle_entry
@@ -3955,14 +3988,30 @@ void horizon_get_memory_info( unsigned long long *total, unsigned long long *use
 }
 
 /* The pipe behind a descriptor from horizon_pipe, or NULL. */
-static struct horizon_pipe *horizon_pipe_from_fd( int fd )
+static struct horizon_pipe_file *horizon_pipe_endpoint( int fd )
 {
-    struct horizon_pipe_file *file;
     __handle *handle;
 
     if (fd < 0 || horizon_pipe_device == -1 || !(handle = __get_handle( fd ))) return NULL;
     if (handle->device != (unsigned int)horizon_pipe_device || !handle->fileStruct) return NULL;
-    file = *(struct horizon_pipe_file **)handle->fileStruct;
+    return *(struct horizon_pipe_file **)handle->fileStruct;
+}
+
+/* Duplicated Unix descriptors share the devoptab endpoint. Claim each
+ * direction once, including when multiple guest threads submit concurrently. */
+unsigned int horizon_mojo_first_io( int fd, int writing )
+{
+    struct horizon_pipe_file *file = horizon_pipe_endpoint( fd );
+    unsigned int bit = writing ? 2 : 1;
+
+    if (!file || !file->mojo_server || (__atomic_load_n( &file->mojo_io_seen, __ATOMIC_RELAXED ) & bit))
+        return 0;
+    return (__atomic_fetch_or( &file->mojo_io_seen, bit, __ATOMIC_RELAXED ) & bit) ? 0 : file->mojo_server;
+}
+
+static struct horizon_pipe *horizon_pipe_from_fd( int fd )
+{
+    struct horizon_pipe_file *file = horizon_pipe_endpoint( fd );
     return file ? file->pipe : NULL;
 }
 
@@ -4213,25 +4262,26 @@ static void horizon_pipe_release( struct horizon_pipe *pipe )
     if (destroy) horizon_pipe_destroy( pipe );
 }
 
-static int horizon_pipe_close_r( struct _reent *r, void *fdptr )
+static void horizon_pipe_close_end( struct horizon_pipe *pipe, int write_end )
 {
-    struct horizon_pipe_file *file = *(struct horizon_pipe_file **)fdptr;
-    struct horizon_pipe *pipe;
-
-    (void)r;
-    if (!file) return 0;
-
-    pipe = file->pipe;
     pthread_mutex_lock( &pipe->mutex );
-    if (file->write_end) pipe->write_open = 0;
+    if (write_end) pipe->write_open = 0;
     else pipe->read_open = 0;
     pthread_cond_broadcast( &pipe->can_read );
     pthread_cond_broadcast( &pipe->can_write );
     pthread_mutex_unlock( &pipe->mutex );
+    horizon_pipe_release( pipe );
+}
 
+static int horizon_pipe_close_r( struct _reent *r, void *fdptr )
+{
+    struct horizon_pipe_file *file = *(struct horizon_pipe_file **)fdptr;
+    (void)r;
+    if (!file) return 0;
+    horizon_pipe_close_end( file->pipe, file->write_end );
+    if (file->reverse) horizon_pipe_close_end( file->reverse, !file->write_end );
     free( file );
     *(struct horizon_pipe_file **)fdptr = NULL;
-    horizon_pipe_release( pipe );
     return 0;
 }
 
@@ -4266,6 +4316,11 @@ static void horizon_cond_wait_quit( pthread_cond_t *cond, pthread_mutex_t *mutex
     }
 }
 
+static struct horizon_pipe *horizon_pipe_ring( struct horizon_pipe_file *file, int writing )
+{
+    return writing == file->write_end ? file->pipe : file->reverse;
+}
+
 static ssize_t horizon_pipe_write_r( struct _reent *r, void *fdptr, const char *ptr, size_t len )
 {
     struct horizon_pipe_file *file = *(struct horizon_pipe_file **)fdptr;
@@ -4273,14 +4328,14 @@ static ssize_t horizon_pipe_write_r( struct _reent *r, void *fdptr, const char *
     unsigned int wake;
     size_t total = 0;
 
-    if (!file || !file->write_end)
+    if (!file || (!file->write_end && !file->reverse))
     {
         horizon_set_reent_errno( r, EBADF );
         return -1;
     }
     if (!len) return 0;
 
-    pipe = file->pipe;
+    pipe = horizon_pipe_ring( file, 1 );
     pthread_mutex_lock( &pipe->mutex );
     while (total < len)
     {
@@ -4288,6 +4343,15 @@ static ssize_t horizon_pipe_write_r( struct _reent *r, void *fdptr, const char *
 
         while (pipe->read_open && pipe->used == HORIZON_PIPE_BUFFER_SIZE)
         {
+            if (file->async)
+            {
+                wake = pipe->read_waiters;
+                pthread_mutex_unlock( &pipe->mutex );
+                if (wake) pthread_cond_signal( &pipe->can_read );
+                if (total) return total;
+                horizon_set_reent_errno( r, EAGAIN );
+                return -1;
+            }
             /* The reader has to make room first. */
             if (pipe->read_waiters) pthread_cond_signal( &pipe->can_read );
             pipe->write_waiters++;
@@ -4329,19 +4393,25 @@ static ssize_t horizon_pipe_read_r( struct _reent *r, void *fdptr, char *ptr, si
     unsigned int wake;
     size_t total = 0;
 
-    if (!file || file->write_end)
+    if (!file || (file->write_end && !file->reverse))
     {
         horizon_set_reent_errno( r, EBADF );
         return -1;
     }
     if (!len) return 0;
 
-    pipe = file->pipe;
+    pipe = horizon_pipe_ring( file, 0 );
     pthread_mutex_lock( &pipe->mutex );
     while (total < len)
     {
         size_t chunk;
 
+        if (file->async && pipe->write_open && !pipe->used)
+        {
+            pthread_mutex_unlock( &pipe->mutex );
+            horizon_set_reent_errno( r, EAGAIN );
+            return -1;
+        }
         if (pipe->write_open && !pipe->used && wine_nx_wait_begin) wine_nx_wait_begin(pipe, 0, 2);
         while (pipe->write_open && !pipe->used)
         {
@@ -4356,6 +4426,11 @@ static ssize_t horizon_pipe_read_r( struct _reent *r, void *fdptr, char *ptr, si
         if (!pipe->used)
         {
             pthread_mutex_unlock( &pipe->mutex );
+            if (file->reverse && !file->stream_eof && !total)
+            {
+                horizon_set_reent_errno( r, EPIPE );
+                return -1;
+            }
             return total;
         }
 
@@ -4365,6 +4440,7 @@ static ssize_t horizon_pipe_read_r( struct _reent *r, void *fdptr, char *ptr, si
         pipe->head = (pipe->head + chunk) % HORIZON_PIPE_BUFFER_SIZE;
         pipe->used -= chunk;
         total += chunk;
+        if (file->reverse && !pipe->used) break; /* byte pipes return available data */
     }
     wake = pipe->write_waiters;
     pthread_mutex_unlock( &pipe->mutex );
@@ -4405,6 +4481,21 @@ static int horizon_pipe_install_device(void)
     return horizon_pipe_device;
 }
 
+static struct horizon_pipe *horizon_pipe_alloc( void )
+{
+    struct horizon_pipe *pipe = calloc( 1, sizeof(*pipe) );
+    if (!pipe) return NULL;
+    pthread_mutex_init( &pipe->mutex, NULL );
+    pthread_cond_init( &pipe->can_read, NULL );
+    pthread_cond_init( &pipe->can_write, NULL );
+    __atomic_add_fetch( &horizon_lifecycle.pipes, 1, __ATOMIC_RELAXED );
+    pipe->refs = 2;
+    pipe->read_open = 1;
+    pipe->write_open = 1;
+
+    return pipe;
+}
+
 int horizon_pipe( int fd[2] )
 {
     struct horizon_pipe_file *read_file = NULL;
@@ -4416,24 +4507,14 @@ int horizon_pipe( int fd[2] )
     fd[1] = -1;
 
     if ((dev = horizon_pipe_install_device()) == -1) return -1;
-    if (!(pipe = calloc( 1, sizeof(*pipe) )) ||
-        !(read_file = calloc( 1, sizeof(*read_file) )) ||
-        !(write_file = calloc( 1, sizeof(*write_file) )))
+    if (!(read_file = calloc( 1, sizeof(*read_file) )) ||
+        !(write_file = calloc( 1, sizeof(*write_file) )) || !(pipe = horizon_pipe_alloc()))
     {
         free( write_file );
         free( read_file );
-        free( pipe );
         errno = ENOMEM;
         return -1;
     }
-
-    pthread_mutex_init( &pipe->mutex, NULL );
-    pthread_cond_init( &pipe->can_read, NULL );
-    pthread_cond_init( &pipe->can_write, NULL );
-    __atomic_add_fetch( &horizon_lifecycle.pipes, 1, __ATOMIC_RELAXED );
-    pipe->refs = 2;
-    pipe->read_open = 1;
-    pipe->write_open = 1;
 
     read_file->pipe = pipe;
     read_file->write_end = 0;
@@ -4459,8 +4540,35 @@ fail:
     else if (pipe) horizon_pipe_release( pipe );
     free( write_file );
     free( read_file );
+    fd[0] = fd[1] = -1;
     errno = EMFILE;
     return -1;
+}
+
+static int horizon_duplex_pipe( int fd[2], int server_async )
+{
+    struct horizon_pipe *reverse;
+    if (horizon_pipe( fd ) == -1) return -1;
+    if (!(reverse = horizon_pipe_alloc()))
+    {
+        close( fd[0] );
+        close( fd[1] );
+        fd[0] = fd[1] = -1;
+        errno = ENOMEM;
+        return -1;
+    }
+    horizon_pipe_endpoint( fd[0] )->reverse = reverse;
+    horizon_pipe_endpoint( fd[1] )->reverse = reverse;
+    horizon_pipe_endpoint( fd[0] )->async = server_async;
+    return 0;
+}
+
+int horizon_process_socketpair( int fd[2] )
+{
+    if (horizon_duplex_pipe( fd, 0 ) == -1) return -1;
+    horizon_pipe_endpoint( fd[0] )->stream_eof = 1;
+    horizon_pipe_endpoint( fd[1] )->stream_eof = 1;
+    return 0;
 }
 
 static void horizon_fd_queue_push( struct horizon_fd_queue *queue, int fd, unsigned int handle,
@@ -4755,6 +4863,8 @@ static void horizon_server_free_object( struct horizon_server_object *object )
     if (object->reg_key) horizon_reg_release( &horizon_registry, object->reg_key );
     if (object->file_fd != -1) close( object->file_fd );
     if (object->file_peer_fd != -1) close( object->file_peer_fd );
+    if (object->startup_info && !--object->startup_info->refs) horizon_server_free_object( object->startup_info );
+    free( object->child_startup );
     free( object->file_name );
     free( object->dir_mask );
     free( object->name );
@@ -4824,8 +4934,9 @@ static unsigned int horizon_server_close_object_handle( unsigned int handle )
         object = entry->object;
         horizon_server_unlink_handle_locked( entry );
         if (object) horizon_sync_notify_object_locked( object, 0 );
-        /* What waits on a socket that is closed ends, as wineserver ends it. */
-        if (object && object->type == HORIZON_SERVER_OBJECT_SOCK && horizon_asyncs.head &&
+        /* Closing the issuing handle cancels its queued I/O. */
+        if (object && horizon_asyncs.head &&
+            (object->type == HORIZON_SERVER_OBJECT_SOCK || object->type == HORIZON_SERVER_OBJECT_NAMED_PIPE) &&
             horizon_async_cancel( &horizon_asyncs, handle, 0, 0, horizon_async_now(), 1 ))
             horizon_sync_notify_async_locked();
         /* server/completion.c's close_handle: closing a port's last handle
@@ -6363,6 +6474,7 @@ static int horizon_server_object_is_signaled( const struct horizon_server_object
 {
     switch (object->type)
     {
+    case HORIZON_SERVER_OBJECT_NAMED_PIPE:
     case HORIZON_SERVER_OBJECT_EVENT:
         return object->signaled;
     case HORIZON_SERVER_OBJECT_MUTEX:
@@ -6383,7 +6495,11 @@ static int horizon_server_object_is_signaled( const struct horizon_server_object
     case HORIZON_SERVER_OBJECT_COMPLETION_WAIT:
         return horizon_completion_wait_signaled( object->wait_port ? &object->wait_port->completion : NULL,
                                                  object->wait_port && object->wait_port->completion_closed );
+    case HORIZON_SERVER_OBJECT_STARTUP_INFO:
+        return object->signaled;
     case HORIZON_SERVER_OBJECT_PROCESS:
+        if (object->startup_info) return object->signaled;
+        /* fall through for a handle to the current process */
     case HORIZON_SERVER_OBJECT_RESERVE:
     case HORIZON_SERVER_OBJECT_KEYED_EVENT:
         return 1;
@@ -11506,7 +11622,185 @@ static void horizon_server_follow_client( struct horizon_server_connection *conn
     }
 }
 
+
+
 static LONG horizon_server_next_tid = 4;
+
+#ifndef HORIZON_STANDALONE_SYNTAX
+static int horizon_server_handle_new_process( struct horizon_server_connection *connection,
+                                            const struct new_process_request *req,
+                                            const unsigned char *data, unsigned int size )
+{
+    struct new_process_reply reply = {0};
+    struct horizon_server_handle_entry *process = NULL, *info = NULL;
+    struct horizon_child_startup *startup = NULL;
+    struct horizon_pipe_file *endpoint = horizon_pipe_endpoint( req->socket_fd );
+    unsigned int offset = 0;
+    int fd = -1;
+    unsigned int status = horizon_server_object_attributes_size( data, size, &offset );
+
+    if (status) goto done;
+    if (!endpoint || !endpoint->stream_eof || size < sizeof(struct object_attributes) ||
+        ((req->handles_size | req->jobs_size) & 3) || req->handles_size > size - offset ||
+        req->jobs_size > size - offset - req->handles_size)
+    {
+        status = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
+    offset += req->handles_size + req->jobs_size;
+    if (req->info_size < sizeof(struct startup_info_data) || req->info_size > size - offset ||
+        ((size - offset - req->info_size) & 1))
+    {
+        status = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
+    /* The Horizon server currently supports children of the caller using its
+     * own token. Do not launch under the wrong identity or silently drop a job. */
+    if (req->token || req->debug || req->jobs_size ||
+        (req->parent_process && req->parent_process != HORIZON_CURRENT_PROCESS_HANDLE))
+    {
+        status = STATUS_NOT_SUPPORTED;
+        goto done;
+    }
+    if (!(startup = malloc( sizeof(*startup) + (size_t)size )))
+    {
+        status = STATUS_NO_MEMORY;
+        goto done;
+    }
+    *startup = (struct horizon_child_startup){ .parent_pid = connection->pid, .status = STATUS_PENDING,
+                                              .info_offset = offset, .info_size = req->info_size, .size = size };
+    memcpy( startup->data, data, size );
+    if ((fd = dup( req->socket_fd )) < 0)
+    {
+        status = horizon_server_errno_status( errno );
+        goto done;
+    }
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if ((process = horizon_server_create_handle_locked( HORIZON_SERVER_OBJECT_PROCESS )) &&
+        (info = horizon_server_create_handle_locked( HORIZON_SERVER_OBJECT_STARTUP_INFO )))
+    {
+        startup->pid = __sync_add_and_fetch( &horizon_server_next_tid, 4 );
+        process->access = horizon_process_map_access( req->access );
+        process->object->startup_info = info->object;
+        info->object->refs++;
+        info->access = SYNCHRONIZE;
+        info->object->file_fd = fd;
+        info->object->child_startup = startup;
+        reply.pid = startup->pid;
+        reply.handle = process->handle;
+        reply.info = info->handle;
+        fd = -1;
+        startup = NULL;
+    }
+    else
+    {
+        status = STATUS_NO_MEMORY;
+        if (process)
+        {
+            horizon_server_unlink_handle_locked( process );
+            horizon_server_free_object( process->object );
+            free( process );
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+done:
+    if (fd != -1) close( fd );
+    free( startup );
+    reply.__header.error = status;
+    int result = horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    if (result && reply.handle)
+    {
+        horizon_server_close_object_handle( reply.info );
+        horizon_server_close_object_handle( reply.handle );
+    }
+    return result;
+}
+
+static int horizon_server_handle_get_new_process_info( struct horizon_server_connection *connection,
+                                                      const struct get_new_process_info_request *req )
+{
+    struct get_new_process_info_reply reply = {0};
+    struct horizon_server_object *info;
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    reply.__header.error = horizon_server_find_typed_object_locked( req->info, HORIZON_SERVER_OBJECT_STARTUP_INFO, &info );
+    if (!reply.__header.error)
+    {
+        reply.exit_code = info->child_startup->status;
+        reply.success = info->signaled && !reply.exit_code;
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+}
+
+/* The only exported descriptor is the client end of Electron's byte pipe. */
+
+
+
+
+
+
+
+
+
+
+void horizon_abort_child_startup( unsigned int process, unsigned int thread, unsigned int status )
+{
+    struct horizon_server_object *p, *t, *info;
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    if (!horizon_server_find_typed_object_locked( process, HORIZON_SERVER_OBJECT_PROCESS, &p ) &&
+        (info = p->startup_info) && !info->signaled)
+    {
+        info->child_startup->status = status;
+        info->signaled = p->signaled = 1;
+        horizon_sync_notify_object_locked( info, 1 );
+        horizon_sync_notify_object_locked( p, 1 );
+        if (thread && !horizon_server_find_typed_object_locked( thread, HORIZON_SERVER_OBJECT_THREAD, &t ) &&
+            t->thread.pid == info->child_startup->pid)
+        {
+            horizon_thread_set_exit_code( &t->thread, status );
+            horizon_thread_mark_terminated( &t->thread, horizon_server_now() );
+            horizon_sync_notify_object_locked( t, 1 );
+        }
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+}
+
+/* The initial thread has no client request fd until the child attaches. Keep
+ * it out of the live pthread list and return the reserved Windows TID. */
+static int horizon_server_handle_initial_thread( struct horizon_server_connection *connection,
+                                                const struct horizon_new_thread_request *req )
+{
+    struct horizon_new_thread_reply reply = {0};
+    struct horizon_server_handle_entry *process, *thread;
+    struct horizon_child_startup *startup;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    process = horizon_server_find_handle_locked( req->process );
+    if (!process || process->object->type != HORIZON_SERVER_OBJECT_PROCESS || !process->object->startup_info)
+        reply.header.error = STATUS_INVALID_HANDLE;
+    else if ((startup = process->object->startup_info->child_startup)->parent_pid != connection->pid ||
+             startup->initial_tid || startup->status != STATUS_PENDING)
+        reply.header.error = STATUS_INVALID_PARAMETER;
+    else if (!(thread = horizon_server_create_handle_locked( HORIZON_SERVER_OBJECT_THREAD )))
+        reply.header.error = STATUS_NO_MEMORY;
+    else
+    {
+        startup->initial_tid = __sync_add_and_fetch( &horizon_server_next_tid, 4 );
+        horizon_thread_init( &thread->object->thread, startup->initial_tid, startup->pid,
+                             horizon_get_system_affinity_mask(), horizon_server_now() );
+        thread->object->thread.suspend = !!(req->flags & HORIZON_THREAD_CREATE_SUSPENDED);
+        thread->access = horizon_thread_map_access( req->access );
+        reply.handle = thread->handle;
+        reply.tid = startup->initial_tid;
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    int result = horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+    if (result && reply.handle) horizon_server_close_object_handle( reply.handle );
+    return result;
+}
+#endif
+
 
 static int horizon_server_handle_new_thread( struct horizon_server_connection *connection,
                                              const unsigned char *message )
@@ -11518,7 +11812,11 @@ static int horizon_server_handle_new_thread( struct horizon_server_connection *c
     struct horizon_server_object *object = NULL;
     unsigned int fd_handle;
     pthread_t thread;
-    int request_fd = horizon_server_take_client_fd( &fd_handle );
+    int request_fd;
+#ifndef HORIZON_STANDALONE_SYNTAX
+    if (request->request_fd == -1) return horizon_server_handle_initial_thread( connection, request );
+#endif
+    request_fd = horizon_server_take_client_fd( &fd_handle );
 
     /* Connection threads are joined here and when another connection ends. */
     horizon_zombie_reap( &horizon_server_zombies );
@@ -12288,7 +12586,7 @@ static struct horizon_async *horizon_server_async_create_locked( struct horizon_
     async->state = HORIZON_ASYNC_DIRECT;
     async->status = HORIZON_STATUS_ALERTED;
     async->data = *data;
-    if (!horizon_server_find_sock_locked( data->handle, &sock ) && sock->file_completion)
+    if (!horizon_server_find_io_object_locked( data->handle, &sock ) && sock->file_completion)
     {
         async->port = sock->file_completion;
         sock->file_completion->refs++;
@@ -12481,6 +12779,30 @@ static int horizon_sock_poll_asyncs_locked( unsigned int handle, struct horizon_
     return changed;
 }
 
+/* The devoptab pipe has no pollable socket fd. Inspect the same ring that
+ * its read/write callback will use, including peer closure. */
+static unsigned int horizon_pipe_async_status( struct horizon_server_object *object, struct horizon_async *async )
+{
+    struct horizon_pipe_file *file = horizon_pipe_endpoint( object->file_fd );
+    struct horizon_pipe *ring;
+    unsigned int status = HORIZON_STATUS_PENDING;
+
+    if (!file || !file->reverse) return HORIZON_STATUS_INVALID_HANDLE;
+    if (async->kind == HORIZON_ASYNC_PIPE_LISTEN)
+        return object->file_peer_fd == -1 ? HORIZON_STATUS_SUCCESS : HORIZON_STATUS_PENDING;
+    ring = horizon_pipe_ring( file, async->direction == HORIZON_ASYNC_WRITE );
+    pthread_mutex_lock( &ring->mutex );
+    if (async->direction == HORIZON_ASYNC_READ)
+    {
+        if (ring->used) status = HORIZON_STATUS_ALERTED;
+        else if (!ring->write_open) status = HORIZON_STATUS_PIPE_BROKEN;
+    }
+    else if (!ring->read_open) status = HORIZON_STATUS_PIPE_BROKEN;
+    else if (ring->used < HORIZON_PIPE_BUFFER_SIZE) status = HORIZON_STATUS_ALERTED;
+    pthread_mutex_unlock( &ring->mutex );
+    return status;
+}
+
 /* Every socket an operation waits on, each looked at once. */
 static int horizon_sock_poll_all_asyncs_locked(void)
 {
@@ -12489,9 +12811,24 @@ static int horizon_sock_poll_all_asyncs_locked(void)
     unsigned int handles[64], count = 0, i;
     int changed = 0;
 
-    for (async = horizon_asyncs.head; async && count < ARRAY_SIZE(handles); async = async->next)
+    for (async = horizon_asyncs.head; async; async = async->next)
     {
         if (async->state != HORIZON_ASYNC_QUEUED) continue;
+        if (async->kind == HORIZON_ASYNC_PIPE_IO || async->kind == HORIZON_ASYNC_PIPE_LISTEN)
+        {
+            struct horizon_server_handle_entry *entry = horizon_server_find_handle_locked( async->sock );
+            unsigned int status;
+            if (!entry || horizon_async_next_queued( &horizon_asyncs, async->sock, async->direction ) != async)
+                continue;
+            status = horizon_pipe_async_status( entry->object, async );
+            if (status != HORIZON_STATUS_PENDING)
+            {
+                horizon_async_ready( &horizon_asyncs, async, status, horizon_async_now() );
+                changed = 1;
+            }
+            continue;
+        }
+        if (count == ARRAY_SIZE(handles)) continue;
         for (i = 0; i < count; i++) if (handles[i] == async->sock) break;
         if (i == count) handles[count++] = async->sock;
     }
@@ -12648,14 +12985,21 @@ static void *horizon_sock_poller_thread( void *param )
     return NULL;
 }
 
-static void horizon_sock_poller_start(void)
+static int horizon_sock_poller_start(void)
 {
-    if (horizon_sock_poller_running) return;
-    if (!pthread_create( &horizon_sock_poller_thread_id, NULL, horizon_sock_poller_thread, NULL ))
+    static pthread_mutex_t start_mutex = PTHREAD_MUTEX_INITIALIZER;
+    int running;
+
+    pthread_mutex_lock( &start_mutex );
+    if (!horizon_sock_poller_running &&
+        !pthread_create( &horizon_sock_poller_thread_id, NULL, horizon_sock_poller_thread, NULL ))
     {
         pthread_detach( horizon_sock_poller_thread_id );
         horizon_sock_poller_running = 1;
     }
+    running = horizon_sock_poller_running;
+    pthread_mutex_unlock( &start_mutex );
+    return running;
 }
 
 static unsigned int horizon_server_get_sock_fd( unsigned int handle, int *fd, int *nonblocking )
@@ -12697,12 +13041,15 @@ static void horizon_named_pipe_name_tail( const unsigned char **name, unsigned i
 {
     static const char dos_prefix[] = "\\??\\pipe\\";
     static const char device_prefix[] = "\\Device\\NamedPipe\\";
+    static const char dos_devices_prefix[] = "\\DosDevices\\pipe\\";
     unsigned int count = 0;
 
     if (horizon_named_pipe_has_prefix( *name, *size, dos_prefix ))
         count = sizeof(dos_prefix) - 1;
     else if (horizon_named_pipe_has_prefix( *name, *size, device_prefix ))
         count = sizeof(device_prefix) - 1;
+    else if (horizon_named_pipe_has_prefix( *name, *size, dos_devices_prefix ))
+        count = sizeof(dos_devices_prefix) - 1;
     if (count)
     {
         *name += count * sizeof(unsigned short);
@@ -12751,6 +13098,21 @@ static struct horizon_server_object *horizon_server_find_named_pipe_locked(
     return connected;
 }
 
+/* Mojo uses an ASCII channel identifier inside an NT UTF-16 object name. */
+static int horizon_mojo_channel( const unsigned char *name, unsigned int size, char channel[96] )
+{
+    unsigned int i;
+    horizon_named_pipe_name_tail( &name, &size );
+    if (!horizon_named_pipe_has_prefix( name, size, "mojo." )) return 0;
+    for (i = 0; i < size / 2 && i < 95; ++i)
+    {
+        unsigned int c = name[2 * i] | (name[2 * i + 1] << 8);
+        channel[i] = c >= 32 && c < 127 ? c : '?';
+    }
+    channel[i] = 0;
+    return 1;
+}
+
 static int horizon_server_handle_create_named_pipe( struct horizon_server_connection *connection,
                                                     const unsigned char *message,
                                                     const unsigned char *data, unsigned int data_size )
@@ -12760,30 +13122,45 @@ static int horizon_server_handle_create_named_pipe( struct horizon_server_connec
     struct horizon_server_handle_entry *entry = NULL;
     struct horizon_object_name name;
     unsigned int access;
+    const char *reason = "create";
     int fd[2] = {-1, -1};
+    char channel[96];
+    int mojo;
+    const int duplex = request->sharing == (FILE_SHARE_READ | FILE_SHARE_WRITE);
+    const int overlapped = !(request->options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT));
 
     memset( &reply, 0, sizeof(reply) );
     reply.header.error = horizon_server_parse_object_attributes( data, data_size, &name );
+    mojo = horizon_mojo_channel( name.name, name.name_len, channel );
     access = horizon_file_map_access( request->access );
     if (!reply.header.error && (!name.name_len || (name.name_len & 1) || !request->access ||
         !request->maxinstances || !request->sharing || (request->sharing & ~3u) ||
-        request->sharing == 3 ||
         (request->disposition != FILE_OPEN && request->disposition != FILE_CREATE &&
          request->disposition != FILE_OPEN_IF)))
+    {
+        reason = "invalid_parameters";
         reply.header.error = HORIZON_STATUS_INVALID_PARAMETER;
+    }
     if (!reply.header.error &&
         (request->maxinstances != 1 ||
          request->flags & (HORIZON_NAMED_PIPE_MESSAGE_STREAM_WRITE |
                            HORIZON_NAMED_PIPE_MESSAGE_STREAM_READ |
                            HORIZON_NAMED_PIPE_NONBLOCKING_MODE)))
+    {
+        reason = "pipe_mode_or_instances";
         reply.header.error = HORIZON_STATUS_NOT_SUPPORTED;
-    if (!reply.header.error && !(request->options & (0x10u | 0x20u)))
+    }
+    if (!reply.header.error && overlapped && !duplex)
+    {
+        reason = "async_not_supported";
         reply.header.error = HORIZON_STATUS_NOT_SUPPORTED;
+    }
     if (!reply.header.error && request->sharing == FILE_SHARE_WRITE && !(access & FILE_READ_DATA))
         reply.header.error = HORIZON_STATUS_ACCESS_DENIED;
     if (!reply.header.error && request->sharing == FILE_SHARE_READ && !(access & FILE_WRITE_DATA))
         reply.header.error = HORIZON_STATUS_ACCESS_DENIED;
-    if (!reply.header.error && horizon_pipe( fd ) == -1)
+    if (!reply.header.error && duplex) reason = "duplex_byte_stream";
+    if (!reply.header.error && (duplex ? horizon_duplex_pipe( fd, overlapped ) : horizon_pipe( fd )) == -1)
         reply.header.error = horizon_server_errno_status( errno );
 
     if (!reply.header.error)
@@ -12805,7 +13182,7 @@ static int horizon_server_handle_create_named_pipe( struct horizon_server_connec
         }
         else
         {
-            if (request->sharing == FILE_SHARE_WRITE)
+            if (duplex || request->sharing == FILE_SHARE_WRITE)
             {
                 entry->object->file_fd = fd[0];
                 entry->object->file_peer_fd = fd[1];
@@ -12815,10 +13192,16 @@ static int horizon_server_handle_create_named_pipe( struct horizon_server_connec
                 entry->object->file_fd = fd[1];
                 entry->object->file_peer_fd = fd[0];
             }
+            if (duplex && mojo && horizon_habl_tracing())
+            {
+                horizon_pipe_endpoint( fd[0] )->mojo_server = entry->handle;
+                horizon_pipe_endpoint( fd[1] )->mojo_server = entry->handle;
+            }
             fd[0] = fd[1] = -1;
             entry->object->file_access = access;
             entry->object->file_options = request->options;
             entry->object->file_sharing = request->sharing;
+            entry->object->signaled = 1;
             entry->object->pipe_flags = request->flags | HORIZON_NAMED_PIPE_SERVER_END;
             reply.handle = entry->handle;
             reply.created = 1;
@@ -12827,6 +13210,20 @@ static int horizon_server_handle_create_named_pipe( struct horizon_server_connec
     }
     if (fd[0] != -1) close( fd[0] );
     if (fd[1] != -1) close( fd[1] );
+    /* The Windows Mojo bootstrap checks the server endpoint immediately after
+     * CreateNamedPipeW. Record the NT parameters as the server received them. */
+    if (mojo)
+    {
+        char line[512];
+        snprintf( line, sizeof(line), "[MOJO] api=CreateNamedPipeW nt=NtCreateNamedPipeFile pid=%x tid=%x "
+                  "name=%s access=%#x share=%#x disposition=%u options=%#x flags=%#x instances=%u "
+                  "in_bytes=%u out_bytes=%u timeout_100ns=%lld reason=%s ntstatus=0x%08x nt_handle=%#x%s",
+                  connection->pid, connection->tid, channel, request->access, request->sharing,
+                  request->disposition, request->options, request->flags, request->maxinstances,
+                  request->insize, request->outsize, request->timeout, reason, reply.header.error, reply.handle,
+                  reply.header.error == HORIZON_STATUS_INVALID_PARAMETER ? " win32_return=INVALID_HANDLE_VALUE mapped_win32_error=0x57" : "" );
+        wine_nx_runtime_trace( line );
+    }
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
@@ -12907,16 +13304,19 @@ static int horizon_server_handle_open_file_object( struct horizon_server_connect
             {
                 entry->object->file_fd = pipe->file_peer_fd;
                 pipe->file_peer_fd = -1;
+                if (pipe->file_sharing == (FILE_SHARE_READ | FILE_SHARE_WRITE))
+                    horizon_pipe_endpoint( entry->object->file_fd )->async =
+                        !(request->options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT));
                 entry->object->file_access = access;
                 entry->object->file_options = request->options;
                 entry->object->file_sharing = pipe->file_sharing;
+                entry->object->signaled = 1;
                 entry->object->pipe_flags = pipe->pipe_flags & ~HORIZON_NAMED_PIPE_SERVER_END;
                 reply.handle = entry->handle;
             }
         }
         pthread_mutex_unlock( &horizon_server_objects_mutex );
-        if (pipe)
-            return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
+        if (pipe) goto done;
     }
 
     if (is_afd || is_nsi)
@@ -12953,6 +13353,19 @@ static int horizon_server_handle_open_file_object( struct horizon_server_connect
         }
     }
 
+ done:
+    {
+        char channel[96], line[384];
+        if (horizon_mojo_channel( data, data_size, channel ))
+        {
+            snprintf( line, sizeof(line), "[MOJO] api=CreateFileW nt=NtCreateFile pid=%x tid=%x name=%s "
+                      "access=%#x share=%#x options=%#x attributes=%#x ntstatus=0x%08x nt_handle=%#x%s",
+                      connection->pid, connection->tid, channel, request->access, request->sharing,
+                      request->options, request->attributes, reply.header.error, reply.handle,
+                      reply.header.error == HORIZON_STATUS_INVALID_PARAMETER ? " mapped_win32_error=0x57" : "" );
+            wine_nx_runtime_trace( line );
+        }
+    }
     return horizon_server_write_reply( connection->reply_fd, &reply, sizeof(reply), NULL, 0 );
 }
 
@@ -13440,7 +13853,6 @@ static void horizon_server_ioctl_start( const struct horizon_async_data *data )
     pthread_mutex_unlock( &horizon_server_objects_mutex );
 }
 
-static unsigned int horizon_server_find_io_object_locked( unsigned int handle, struct horizon_server_object **object );
 
 static void horizon_server_ioctl_done( unsigned int tid, const struct horizon_async_data *data,
                                        unsigned int status, unsigned int information )
@@ -13490,6 +13902,49 @@ static int horizon_server_handle_nsi_ioctl( struct horizon_server_connection *co
     return result;
 }
 
+static unsigned int horizon_server_queue_pipe_async( struct horizon_server_connection *connection,
+                                                    const struct horizon_async_data *data, int direction, int kind )
+{
+    struct horizon_server_handle_entry *entry;
+    struct horizon_async *async;
+    unsigned int status;
+
+    pthread_mutex_lock( &horizon_server_objects_mutex );
+    entry = horizon_server_find_handle_locked( data->handle );
+    if (!entry) status = HORIZON_STATUS_INVALID_HANDLE;
+    else if (entry->object->type != HORIZON_SERVER_OBJECT_NAMED_PIPE ||
+             entry->object->file_sharing != (FILE_SHARE_READ | FILE_SHARE_WRITE))
+        status = HORIZON_STATUS_NOT_SUPPORTED;
+    else if (kind == HORIZON_ASYNC_PIPE_LISTEN && !(entry->object->pipe_flags & HORIZON_NAMED_PIPE_SERVER_END))
+        status = HORIZON_STATUS_INVALID_PARAMETER;
+    else if (kind == HORIZON_ASYNC_PIPE_LISTEN && entry->object->file_peer_fd == -1)
+        status = HORIZON_STATUS_PIPE_CONNECTED;
+    else if (!horizon_sock_poller_start() ||
+             !(async = horizon_server_async_create_locked( connection, data, direction, kind )))
+        status = HORIZON_STATUS_NO_MEMORY;
+    else
+    {
+        entry->object->signaled = 0;
+        async->pending = 1;
+        async->state = HORIZON_ASYNC_QUEUED;
+        status = HORIZON_STATUS_PENDING;
+    }
+    pthread_mutex_unlock( &horizon_server_objects_mutex );
+    return status;
+}
+
+static int horizon_server_handle_register_async( struct horizon_server_connection *connection,
+                                                 const unsigned char *message )
+{
+    const struct horizon_register_async_request *request = (const void *)message;
+    unsigned int status = HORIZON_STATUS_NOT_SUPPORTED;
+
+    if (request->type == 1 || request->type == 2) /* Wine ASYNC_TYPE_READ / WRITE */
+        status = horizon_server_queue_pipe_async( connection, &request->async,
+                    request->type == 1 ? HORIZON_ASYNC_READ : HORIZON_ASYNC_WRITE, HORIZON_ASYNC_PIPE_IO );
+    return horizon_server_write_status( connection->reply_fd, status );
+}
+
 static int horizon_server_handle_ioctl( struct horizon_server_connection *connection,
                                         const unsigned char *message,
                                         const unsigned char *data, unsigned int data_size )
@@ -13511,6 +13966,11 @@ static int horizon_server_handle_ioctl( struct horizon_server_connection *connec
 
     switch (request->code)
     {
+    case HORIZON_FSCTL_PIPE_LISTEN:
+        /* A connection waiter has a separate queue from reads and writes. */
+        status = horizon_server_queue_pipe_async( connection, &request->async, 2, HORIZON_ASYNC_PIPE_LISTEN );
+        break;
+
     case HORIZON_IOCTL_AFD_WINE_CREATE:
         status = horizon_sock_ioctl_create( handle, data, data_size );
         break;
@@ -14833,6 +15293,8 @@ static unsigned int horizon_server_find_io_object_locked( unsigned int handle, s
         status = horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_SOCK, object );
     if (status == HORIZON_STATUS_OBJECT_TYPE_MISMATCH)
         status = horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_NSI, object );
+    if (status == HORIZON_STATUS_OBJECT_TYPE_MISMATCH)
+        status = horizon_server_find_typed_object_locked( handle, HORIZON_SERVER_OBJECT_NAMED_PIPE, object );
     return status;
 }
 
@@ -15357,6 +15819,7 @@ static int horizon_sync_queue_locked( struct horizon_sync_waiter *waiter )
         case HORIZON_SERVER_OBJECT_TIMER:
         case HORIZON_SERVER_OBJECT_THREAD:
         case HORIZON_SERVER_OBJECT_MSG_QUEUE:
+        case HORIZON_SERVER_OBJECT_NAMED_PIPE:
         case HORIZON_SERVER_OBJECT_COMPLETION:
             break;
         case HORIZON_SERVER_OBJECT_COMPLETION_WAIT:
@@ -15627,6 +16090,12 @@ static void horizon_async_finish_locked( struct horizon_async *async, unsigned i
         horizon_server_post_completion_locked( port, async->port_key, async->data.apc_context, status, total );
     if ((actions & HORIZON_ASYNC_EVENT) && (event = horizon_server_find_handle_locked( async->data.event )) &&
         event->object->type == HORIZON_SERVER_OBJECT_EVENT && !event->object->signaled)
+    {
+        event->object->signaled = 1;
+        horizon_sync_notify_object_locked( event->object, 1 );
+    }
+    if ((async->kind == HORIZON_ASYNC_PIPE_IO || async->kind == HORIZON_ASYNC_PIPE_LISTEN) &&
+        (event = horizon_server_find_handle_locked( async->sock )) && !event->object->signaled)
     {
         event->object->signaled = 1;
         horizon_sync_notify_object_locked( event->object, 1 );
@@ -16029,6 +16498,14 @@ static void *horizon_server_thread( void *param )
         case HORIZON_REQ_RENAME_KEY:
             status = horizon_server_handle_registry( connection, message, request_data, header->request_size );
             break;
+#ifndef HORIZON_STANDALONE_SYNTAX
+        case REQ_get_new_process_info:
+            status = horizon_server_handle_get_new_process_info( connection, (const void *)message );
+            break;
+        case REQ_new_process:
+            status = horizon_server_handle_new_process( connection, (const void *)message, request_data, header->request_size );
+            break;
+#endif
         case HORIZON_REQ_INIT_FIRST_THREAD:
             status = horizon_server_handle_init_first_thread( connection, message );
             break;
@@ -16090,6 +16567,9 @@ static void *horizon_server_thread( void *param )
             break;
         case HORIZON_REQ_SOCKET_GET_EVENTS:
             status = horizon_server_handle_socket_get_events( connection, message );
+            break;
+        case HORIZON_REQ_REGISTER_ASYNC:
+            status = horizon_server_handle_register_async( connection, message );
             break;
         case HORIZON_REQ_SET_ASYNC_DIRECT_RESULT:
             status = horizon_server_handle_set_async_direct_result( connection, message );

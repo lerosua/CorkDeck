@@ -45,6 +45,9 @@
 #define HORIZON_ASYNC_STATUS_CANCELLED 0xc0000120u
 #define HORIZON_ASYNC_STATUS_HANDLES_CLOSED 0x8000000au  /* a warning: the port still hears of it */
 
+#define HORIZON_ASYNC_PIPE_IO     3
+#define HORIZON_ASYNC_PIPE_LISTEN 4
+
 /* What the completion of one async has to do. */
 #define HORIZON_ASYNC_POST    0x1  /* a packet on the socket's completion port */
 #define HORIZON_ASYNC_APC     0x2  /* the program's completion routine, as a user APC */

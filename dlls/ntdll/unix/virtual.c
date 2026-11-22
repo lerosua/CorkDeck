@@ -927,6 +927,7 @@ extern const unixlib_entry_t wine_nx_ws2_32_unix_funcs[];
 extern const unixlib_entry_t wine_nx_dnsapi_unix_funcs[];
 extern const unixlib_entry_t wine_nx_crypt32_unix_funcs[];
 extern NTSTATUS wine_nx_win32u_unix_init(void);
+extern const unixlib_entry_t wine_nx_dwrite_unix_funcs[];
 extern const unixlib_entry_t wine_nx_opengl32_unix_funcs[];
 extern const unixlib_entry_t wine_nx_audio_unix_funcs[];
 extern const unixlib_entry_t wine_nx_wma_unix_funcs[];
@@ -966,6 +967,7 @@ static const struct
     { "dnsapi.dll", wine_nx_dnsapi_unix_funcs },
     { "crypt32.dll", wine_nx_crypt32_unix_funcs },
     { "win32u.dll", NULL, wine_nx_win32u_unix_init },
+    { "dwrite.dll", wine_nx_dwrite_unix_funcs },
     { "opengl32.dll", wine_nx_opengl32_unix_funcs },
     { "winenxaudio.drv", wine_nx_audio_unix_funcs },
     { "wmadmod.dll", wine_nx_wma_unix_funcs },
@@ -984,8 +986,10 @@ static const struct
 extern const unixlib_entry_t wine_nx_ws2_32_wow64_unix_funcs[];
 extern const unixlib_entry_t wine_nx_dnsapi_wow64_unix_funcs[];
 extern const unsigned int wine_nx_dnsapi_wow64_unix_count;
+extern const unixlib_entry_t wine_nx_dwrite_wow64_unix_funcs[];
 extern const unixlib_entry_t wine_nx_opengl32_wow64_unix_funcs[];
 extern const unsigned int wine_nx_ws2_32_wow64_unix_count;
+extern const unsigned int wine_nx_dwrite_wow64_unix_count;
 extern const unsigned int wine_nx_opengl32_wow64_unix_count;
 extern const unixlib_entry_t wine_nx_audio_wow64_unix_funcs[];
 extern const unsigned int wine_nx_audio_wow64_unix_count;
@@ -1007,6 +1011,7 @@ static const struct
 {
     { "ws2_32.dll", wine_nx_ws2_32_wow64_unix_funcs, &wine_nx_ws2_32_wow64_unix_count },
     { "dnsapi.dll", wine_nx_dnsapi_wow64_unix_funcs, &wine_nx_dnsapi_wow64_unix_count },
+    { "dwrite.dll", wine_nx_dwrite_wow64_unix_funcs, &wine_nx_dwrite_wow64_unix_count },
     { "opengl32.dll", wine_nx_opengl32_wow64_unix_funcs, &wine_nx_opengl32_wow64_unix_count },
     { "winenxaudio.drv", wine_nx_audio_wow64_unix_funcs, &wine_nx_audio_wow64_unix_count },
     { "wmadmod.dll", wine_nx_wma_unix_funcs, &wine_nx_wma_unix_count },

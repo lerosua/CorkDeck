@@ -25,7 +25,14 @@
 #include "config.h"
 
 #include <sys/types.h>
+#ifdef __SWITCH__
+#include <pthread.h>
+#include <stdio.h>
+extern int wine_nx_electron_probe_active(void) __attribute__((weak));
+extern void wine_nx_runtime_trace(const char *msg) __attribute__((weak));
+#else
 #include <dlfcn.h>
+#endif
 
 #ifdef HAVE_FT2BUILD_H
 #include <ft2build.h>
@@ -47,7 +54,12 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(dwrite);
 
+#ifdef __SWITCH__
+static pthread_mutex_t library_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned int library_users;
+#else
 static void *ft_handle = NULL;
+#endif
 static FT_Library library = 0;
 typedef struct
 {
@@ -56,7 +68,11 @@ typedef struct
     FT_Int patch;
 } FT_Version_t;
 
+#ifdef __SWITCH__
+#define MAKE_FUNCPTR(f) static typeof(f) *const p##f = f
+#else
 #define MAKE_FUNCPTR(f) static typeof(f) * p##f = NULL
+#endif
 MAKE_FUNCPTR(FT_Activate_Size);
 MAKE_FUNCPTR(FT_Done_Face);
 MAKE_FUNCPTR(FT_Done_FreeType);
@@ -115,6 +131,15 @@ static NTSTATUS process_attach(void *args)
 {
     FT_Version_t FT_Version;
 
+#ifdef __SWITCH__
+    pthread_mutex_lock(&library_lock);
+    if (library_users)
+    {
+        ++library_users;
+        pthread_mutex_unlock(&library_lock);
+        return STATUS_SUCCESS;
+    }
+#else
     ft_handle = dlopen(SONAME_LIBFREETYPE, RTLD_NOW);
     if (!ft_handle)
     {
@@ -152,29 +177,50 @@ static NTSTATUS process_attach(void *args)
     LOAD_FUNCPTR(FT_Outline_Translate)
     LOAD_FUNCPTR(FT_Set_Pixel_Sizes)
 #undef LOAD_FUNCPTR
+#endif
 
     if (pFT_Init_FreeType(&library) != 0)
     {
         ERR("Can't init FreeType library\n");
+#ifdef __SWITCH__
+        pthread_mutex_unlock(&library_lock);
+#else
         dlclose(ft_handle);
         ft_handle = NULL;
+#endif
         return STATUS_UNSUCCESSFUL;
     }
     pFT_Library_Version(library, &FT_Version.major, &FT_Version.minor, &FT_Version.patch);
 
+#ifdef __SWITCH__
+    library_users = 1;
+    pthread_mutex_unlock(&library_lock);
+#endif
     TRACE("FreeType version is %d.%d.%d\n", FT_Version.major, FT_Version.minor, FT_Version.patch);
     return STATUS_SUCCESS;
 
+#ifndef __SWITCH__
 sym_not_found:
     WINE_MESSAGE("Wine cannot find certain functions that it needs from FreeType library.\n");
     dlclose(ft_handle);
     ft_handle = NULL;
     return STATUS_UNSUCCESSFUL;
+#endif
 }
 
 static NTSTATUS process_detach(void *args)
 {
+#ifdef __SWITCH__
+    pthread_mutex_lock(&library_lock);
+    if (library_users && !--library_users)
+    {
+        pFT_Done_FreeType(library);
+        library = NULL;
+    }
+    pthread_mutex_unlock(&library_lock);
+#else
     pFT_Done_FreeType(library);
+#endif
     return STATUS_SUCCESS;
 }
 
@@ -184,7 +230,20 @@ static NTSTATUS create_font_object(void *args)
     FT_Face face = NULL;
     FT_Error fterror;
 
+    *params->object = 0;
     fterror = pFT_New_Memory_Face(library, params->data, params->size, params->index, &face);
+#ifdef __SWITCH__
+    if (wine_nx_electron_probe_active && wine_nx_electron_probe_active() && wine_nx_runtime_trace)
+    {
+        char message[384];
+        snprintf(message, sizeof(message),
+                "[EPROBE] font backend=DirectWrite FT_New_Memory_Face family=%s style=%s index=%u bytes=%llu ft_error=%d status=%08x",
+                face && face->family_name ? face->family_name : "(none)",
+                face && face->style_name ? face->style_name : "(none)", params->index,
+                (unsigned long long)params->size, fterror, (unsigned)(fterror ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS));
+        wine_nx_runtime_trace(message);
+    }
+#endif
     if (fterror != FT_Err_Ok)
     {
         WARN("Failed to create a face object, error %d.\n", fterror);
@@ -1038,5 +1097,8 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
 };
 
 C_ASSERT( ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count );
+#ifdef __SWITCH__
+const unsigned int wine_nx_dwrite_wow64_unix_count = unix_funcs_count;
+#endif
 
 #endif  /* _WIN64 */

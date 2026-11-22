@@ -410,6 +410,20 @@ target_compile_options(wine-win32u-real PRIVATE
 
 target_include_directories(wine-win32u-real PRIVATE ${WINE_SWITCH_WIN32U_INCLUDES})
 
+# DirectWrite's PE font faces use the same static FreeType as GDI.
+add_library(wine-dwrite-unix-real OBJECT ../dlls/dwrite/freetype.c)
+target_compile_definitions(wine-dwrite-unix-real PRIVATE
+    ${WINE_SWITCH_NTDLL_DEFS}
+    HAVE_FT2BUILD_H=1
+    SONAME_LIBFREETYPE="libfreetype.a"
+    __wine_unix_call_funcs=wine_nx_dwrite_unix_funcs
+    __wine_unix_call_wow64_funcs=wine_nx_dwrite_wow64_unix_funcs
+)
+target_compile_options(wine-dwrite-unix-real PRIVATE
+    -std=gnu11 -Wall -Wextra -Werror=implicit-function-declaration -ffunction-sections -fdata-sections
+)
+target_include_directories(wine-dwrite-unix-real PRIVATE ${WINE_SWITCH_WIN32U_INCLUDES})
+
 # opengl32's unix side: wgl and the GL thunks over win32u's EGL functions, with
 # its unixlib tables renamed for virtual.c's static table lookup.
 add_library(wine-opengl32-unix-real OBJECT
@@ -667,6 +681,7 @@ add_executable(wine-nx-runtime
     $<TARGET_OBJECTS:wine-tape-real>
     $<TARGET_OBJECTS:wine-win32u-real>
     $<TARGET_OBJECTS:wine-opengl32-unix-real>
+    $<TARGET_OBJECTS:wine-dwrite-unix-real>
 )
 
 target_sources(wine-nx-runtime PRIVATE

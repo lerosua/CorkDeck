@@ -401,12 +401,17 @@ static BOOL is_unix_console_handle( HANDLE handle )
  *           spawn_process
  */
 static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
-                               int unixdir, char *winedebug, const struct pe_image_info *pe_info )
+                               int unixdir, char *winedebug, const struct pe_image_info *pe_info, pid_t *host_pid )
 {
     NTSTATUS status = STATUS_SUCCESS;
     int stdin_fd = -1, stdout_fd = -1;
+#ifdef __SWITCH__
+    int spawn_errno = 0;
+#endif
     pid_t pid;
     char **argv;
+
+    *host_pid = 0;
 
     if (wine_server_handle_to_fd( params->hStdInput, FILE_READ_DATA, &stdin_fd, NULL ) &&
         isatty(0) && is_unix_console_handle( params->hStdInput ))
@@ -418,7 +423,9 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
 
     if (!(pid = fork()))  /* child */
     {
+#ifndef __SWITCH__
         if (!(pid = fork()))  /* grandchild */
+#endif
         {
             if ((peb && peb->ProcessParameters &&
                  params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
@@ -446,21 +453,38 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
             _exit(1);
         }
 
+#ifndef __SWITCH__
         _exit(pid == -1);
+#endif
     }
 
+#ifdef __SWITCH__
+    /* Keep the loader as the direct child so its host PID is observable.
+     * Only the Wine startup handshake can confirm it entered the renderer. */
+    if (pid > 0) *host_pid = pid;
+    else
+    {
+        spawn_errno = errno;
+        if (spawn_errno == ENOSYS) status = STATUS_NOT_IMPLEMENTED;
+        else if (spawn_errno == ENOMEM) status = STATUS_NO_MEMORY;
+        else status = errno_to_status( spawn_errno );
+    }
+#else
     if (pid != -1)
     {
-        /* reap child */
         pid_t wret;
         do {
             wret = waitpid(pid, NULL, 0);
         } while (wret < 0 && errno == EINTR);
     }
     else status = STATUS_NO_MEMORY;
+#endif
 
     if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
     if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
+#ifdef __SWITCH__
+    errno = spawn_errno;
+#endif
     return status;
 }
 
@@ -678,6 +702,82 @@ static NTSTATUS alloc_handle_list( const PS_ATTRIBUTE *handles_attr, obj_handle_
     return STATUS_SUCCESS;
 }
 
+#ifdef __SWITCH__
+extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
+
+/* Only log the image basename and Chromium role. The command line can also
+ * contain URLs, tokens and inherited handle lists. */
+static unsigned int trace_child_start( RTL_USER_PROCESS_PARAMETERS *params, ULONG flags, ULONG thread_flags )
+{
+    static unsigned int sequence;
+    static const WCHAR type[] = {'-','-','t','y','p','e','='};
+    char image[128], role[48] = "unspecified", line[320];
+    if (!wine_nx_runtime_trace || !horizon_habl_tracing() || !params) return 0;
+    const WCHAR *path = params->ImagePathName.Buffer, *command = params->CommandLine.Buffer;
+    unsigned int len = params->ImagePathName.Length / sizeof(WCHAR), start = 0, i, n;
+    unsigned int chars = params->CommandLine.Length / sizeof(WCHAR), id;
+    for (i = 0; i < len; i++) if (path[i] == '/' || path[i] == '\\') start = i + 1;
+    for (i = start, n = 0; i < len && n < sizeof(image)-1; ++i)
+        image[n++] = path[i] >= 32 && path[i] < 127 ? path[i] : '?';
+    image[n] = 0;
+    for (i = 0; i + ARRAY_SIZE(type) < chars; i++)
+    {
+        if (i && command[i-1] != ' ' && command[i-1] != '"' && command[i-1] != '\t') continue;
+        if (memcmp( command+i, type, sizeof(type) )) continue;
+        i += ARRAY_SIZE(type);
+        for (n = 0; n < sizeof(role)-1 && i < chars; ++i)
+        {
+            WCHAR c = command[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '-' || c == '_')) break;
+            role[n++] = c;
+        }
+        role[n] = 0;
+        break;
+    }
+    id = __atomic_add_fetch( &sequence, 1, __ATOMIC_RELAXED );
+    snprintf( line, sizeof(line), "[HABL] child_start id=%u api=NtCreateUserProcess tid=%p image=%s "
+              "type=%s process_flags=%#x thread_flags=%#x",
+              id, NtCurrentTeb()->ClientId.UniqueThread, image, role, (unsigned int)flags, (unsigned int)thread_flags );
+    wine_nx_runtime_trace( line );
+    return id;
+}
+
+static void trace_child_stage_result( unsigned int id, const char *stage, unsigned int status, int host_errno,
+                                      ULONG pid, ULONG tid )
+{
+    char line[200];
+    if (!id) return;
+    snprintf( line, sizeof(line), "[HABL] child_stage_result id=%u stage=%s ntstatus=0x%08x host_errno=%d pid=%u tid=%u",
+              id, stage, status, host_errno, (unsigned int)pid, (unsigned int)tid );
+    wine_nx_runtime_trace( line );
+}
+
+static void trace_child_result( unsigned int id, const char *step, unsigned int status, int host_errno,
+                                HANDLE process, HANDLE thread, ULONG pid, ULONG tid, BOOL spawn_called )
+{
+    char line[256];
+    if (!id) return;
+    snprintf( line, sizeof(line), "[HABL] child_result id=%u step=%s ntstatus=0x%08x host_errno=%d "
+              "process=%p thread=%p pid=%u tid=%u spawn_process=%s", id, step, status, host_errno, process, thread,
+              (unsigned int)pid, (unsigned int)tid, spawn_called ? "called" : "not-called" );
+    wine_nx_runtime_trace( line );
+}
+extern int wine_nx_electron_probe_active(void) __attribute__((weak));
+static void trace_child_step( unsigned int id, const char *step )
+{
+    char line[128];
+    int saved_errno = errno;
+    if (!id || !wine_nx_electron_probe_active || !wine_nx_electron_probe_active()) return;
+    snprintf( line, sizeof(line), "[EPROBE] child_step id=%u step=%s", id, step );
+    wine_nx_runtime_trace( line );
+    errno = saved_errno;
+}
+#define CHILD_STEP(s) do { child_step = (s); trace_child_step( trace_id, child_step ); } while (0)
+#else
+#define CHILD_STEP(s) ((void)0)
+#endif
+
 /**********************************************************************
  *           NtCreateUserProcess  (NTDLL.@)
  */
@@ -699,7 +799,8 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     ULONG startup_info_size, env_size;
     int unixdir, socketfd[2] = { -1, -1 };
     struct pe_image_info pe_info;
-    ULONG process_id, thread_id;
+    ULONG process_id = 0, thread_id = 0;
+    pid_t host_pid = 0;
     USHORT machine = 0;
     HANDLE parent = 0, debug = 0, token = 0;
     UNICODE_STRING nt_name, path = {0};
@@ -708,11 +809,20 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     const PS_ATTRIBUTE *handles_attr = NULL, *jobs_attr = NULL;
     data_size_t handles_size, jobs_size;
     obj_handle_t *handles, *jobs;
+#ifdef __SWITCH__
+    unsigned int trace_id = trace_child_start( params, process_flags, thread_flags );
+    const char *child_step = "open-image";
+    int host_errno = 0;
+    BOOL returned_handles = FALSE, spawn_called = FALSE;
+#endif
 
     if (thread_flags & THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER)
     {
         WARN( "Invalid thread flags %#x.\n", thread_flags );
 
+#ifdef __SWITCH__
+        trace_child_result( trace_id, "validate-flags", STATUS_INVALID_PARAMETER, 0, NULL, NULL, 0, 0, FALSE );
+#endif
         return STATUS_INVALID_PARAMETER;
     }
 
@@ -757,6 +867,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     TRACE( "%s image %s cmdline %s parent %p machine %x\n", debugstr_us( &path ),
            debugstr_us( &params->ImagePathName ), debugstr_us( &params->CommandLine ), parent, machine );
 
+    CHILD_STEP("open-image");
     unixdir = get_unix_curdir( params );
 
     InitializeObjectAttributes( &attr, &path, OBJ_CASE_INSENSITIVE, 0, 0 );
@@ -768,6 +879,9 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
             memset( info, 0, sizeof(*info) );
             free( unix_name );
             free( nt_name.Buffer );
+#ifdef __SWITCH__
+            trace_child_result( trace_id, "unix-exec", STATUS_SUCCESS, 0, NULL, NULL, 0, 0, FALSE );
+#endif
             return STATUS_SUCCESS;
         }
         goto done;
@@ -780,6 +894,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         /* Taken as the program to run next: the caller gets two real objects,
          * already signalled, for a program that as far as waiting goes is over.
          * They are not a process and a thread, and say so when asked for more. */
+        CHILD_STEP("launcher-policy");
         if (&wine_nx_note_child_program &&
             wine_nx_note_child_program( unix_name, params->CommandLine.Buffer,
                                         params->CommandLine.Length / sizeof(WCHAR) ) &&
@@ -787,6 +902,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         {
             if (!NtCreateEvent( &thread_handle, EVENT_ALL_ACCESS, NULL, NotificationEvent, TRUE ))
             {
+                CHILD_STEP("deferred-to-launcher");
                 process_id = thread_id = 0;
                 memset( info, 0, sizeof(*info) );
                 goto output;
@@ -802,18 +918,25 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         if (is_arm64ec() && pe_info.is_hybrid && machine == IMAGE_FILE_MACHINE_ARM64)
             machine = main_image_info.Machine;
     }
+    CHILD_STEP("startup-info");
     if (!(startup_info = create_startup_info( attr.ObjectName, process_flags, params, &pe_info, &startup_info_size )))
+    {
+        status = STATUS_NO_MEMORY;
         goto done;
+    }
     env_size = get_env_size( params, &winedebug );
 
+    CHILD_STEP("process-attributes");
     if ((status = wine_server_alloc_object_attributes( process_attr, &objattr, &attr_len ))) goto done;
 
+    CHILD_STEP("handle-list");
     if ((status = alloc_handle_list( handles_attr, &handles, &handles_size )))
     {
         free( objattr );
         goto done;
     }
 
+    CHILD_STEP("job-list");
     if ((status = alloc_handle_list( jobs_attr, &jobs, &jobs_size )))
     {
         free( objattr );
@@ -823,26 +946,43 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
 
     /* create the socket for the new process */
 
-    if (socketpair( PF_UNIX, SOCK_STREAM, 0, socketfd ) == -1)
+    CHILD_STEP("socketpair");
+#ifdef __SWITCH__
+    /* The in-process Horizon server needs a blocking, bidirectional byte stream.
+     * Its pipe device works offline and does not depend on libnx PF_UNIX support. */
+    if (horizon_process_socketpair( socketfd ) == -1)
     {
-        status = STATUS_TOO_MANY_OPENED_FILES;
+        host_errno = errno;
+        status = host_errno == ENOMEM ? STATUS_NO_MEMORY : errno_to_status( host_errno );
+    }
+    trace_child_stage_result( trace_id, "horizon-duplex", status, host_errno, 0, 0 );
+#else
+    if (socketpair( PF_UNIX, SOCK_STREAM, 0, socketfd ) == -1) status = STATUS_TOO_MANY_OPENED_FILES;
+#endif
+    if (status)
+    {
         free( objattr );
         free( handles );
         free( jobs );
         goto done;
     }
+
+#ifndef __SWITCH__
 #ifdef SO_PASSCRED
-    else
     {
         int enable = 1;
         setsockopt( socketfd[0], SOL_SOCKET, SO_PASSCRED, &enable, sizeof(enable) );
     }
 #endif
-
     wine_server_send_fd( socketfd[1] );
+#endif
+    /* On Horizon the synchronous request borrows socket_fd from the shared
+     * descriptor table. A server retaining it must dup it before replying.
+     * An unsupported request must not leave an fd in the next request's queue. */
 
     /* create the process on the server side */
 
+    CHILD_STEP("new-process");
     SERVER_START_REQ( new_process )
     {
         req->token          = wine_server_obj_handle( token );
@@ -864,11 +1004,14 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         {
             process_handle = wine_server_ptr_handle( reply->handle );
             process_id     = reply->pid;
+            process_info   = wine_server_ptr_handle( reply->info );
         }
-        process_info = wine_server_ptr_handle( reply->info );
     }
     SERVER_END_REQ;
     close( socketfd[1] );
+#ifdef __SWITCH__
+    trace_child_stage_result( trace_id, "new_process", status, 0, process_id, 0 );
+#endif
     free( objattr );
     free( handles );
     free( jobs );
@@ -888,8 +1031,10 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
         goto done;
     }
 
+    CHILD_STEP("thread-attributes");
     if ((status = wine_server_alloc_object_attributes( thread_attr, &objattr, &attr_len ))) goto done;
 
+    CHILD_STEP("new-thread");
     SERVER_START_REQ( new_thread )
     {
         req->process    = wine_server_obj_handle( process_handle );
@@ -905,24 +1050,52 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     }
     SERVER_END_REQ;
     free( objattr );
+#ifdef __SWITCH__
+    trace_child_stage_result( trace_id, "initial_thread", status, 0, process_id, thread_id );
+#endif
     if (status) goto done;
 
     /* create the child process */
 
-    if ((status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info ))) goto done;
+    CHILD_STEP("spawn");
+    status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info, &host_pid );
+#ifdef __SWITCH__
+    spawn_called = TRUE;
+    host_errno = status ? errno : 0;
+    if (trace_id)
+    {
+        char line[240];
+        snprintf( line, sizeof(line), "[HABL] child_stage_result id=%u stage=spawn_process ntstatus=0x%08x "
+                  "host_errno=%d wine_pid=%u wine_tid=%u host_child_pid=%d",
+                  trace_id, status, host_errno, (unsigned int)process_id, (unsigned int)thread_id, (int)host_pid );
+        wine_nx_runtime_trace( line );
+    }
+#endif
+    if (status) goto done;
 
     close( socketfd[0] );
     socketfd[0] = -1;
 
     /* wait for the new process info to be ready */
 
-    NtWaitForSingleObject( process_info, FALSE, NULL );
+    CHILD_STEP("child-startup-result");
+#ifdef __SWITCH__
+    /* A host PID alone cannot satisfy a Windows process startup request. */
+    LARGE_INTEGER startup_timeout = { .QuadPart = -10LL * 10000000 };
+    status = NtWaitForSingleObject( process_info, FALSE, &startup_timeout );
+    if (status == STATUS_TIMEOUT) status = STATUS_IO_TIMEOUT;
+    if (status) goto done;
+#else
+    if ((status = NtWaitForSingleObject( process_info, FALSE, NULL ))) goto done;
+#endif
     SERVER_START_REQ( get_new_process_info )
     {
         req->info = wine_server_obj_handle( process_info );
-        wine_server_call( req );
-        success = reply->success;
-        status = reply->exit_code;
+        if (!(status = wine_server_call( req )))
+        {
+            success = reply->success;
+            status = reply->exit_code;
+        }
     }
     SERVER_END_REQ;
 
@@ -968,12 +1141,20 @@ output:
             break;
         }
     }
+#ifdef __SWITCH__
+    returned_handles = TRUE;
+#endif
     *process_handle_ptr = process_handle;
     *thread_handle_ptr = thread_handle;
     process_handle = thread_handle = 0;
     status = STATUS_SUCCESS;
 
 done:
+#ifdef __SWITCH__
+    if (status && process_info)
+        horizon_abort_child_startup( wine_server_obj_handle( process_handle ),
+                                     wine_server_obj_handle( thread_handle ), status );
+#endif
     if (file_handle) NtClose( file_handle );
     if (process_info) NtClose( process_info );
     if (process_handle) NtClose( process_handle );
@@ -984,8 +1165,16 @@ done:
     free( winedebug );
     free( unix_name );
     free( nt_name.Buffer );
+#ifdef __SWITCH__
+    trace_child_result( trace_id, child_step, status, host_errno,
+                        returned_handles ? *process_handle_ptr : NULL,
+                        returned_handles ? *thread_handle_ptr : NULL,
+                        process_id, thread_id, spawn_called );
+#endif
     return status;
 }
+#undef CHILD_STEP
+
 
 
 /******************************************************************************
@@ -1005,10 +1194,12 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
      * hbloader after exit() is reported as an Atmosphere user-break crash. */
     if (handle == GetCurrentProcess() || handle == NULL)
     {
+        extern unsigned int wine_nx_probe_snapshot( const char *, unsigned int, ULONG_PTR ) __attribute__((weak));
         extern int horizon_registry_flush(void);
-        extern void wine_nx_runtime_trace( const char *msg ) __attribute__((weak));
         extern void wine_nx_runtime_dump_std_streams(void) __attribute__((weak));
         extern void wine_nx_box64_trace_exit( const I386_CONTEXT * ) __attribute__((weak));
+        /* Direct Unix callers can terminate without crossing the PE syscall dispatcher. */
+        if (wine_nx_probe_snapshot) wine_nx_probe_snapshot( "self-terminate", (unsigned int)exit_code, 0 );
         if (wine_nx_box64_trace_exit) wine_nx_box64_trace_exit( get_cpu_area( get_thread_data(), IMAGE_FILE_MACHINE_I386 ) );
         horizon_registry_flush();
         {

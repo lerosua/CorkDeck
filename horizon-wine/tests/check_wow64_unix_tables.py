@@ -94,6 +94,9 @@ static NTSTATUS crypt_call( void *args ) { last = 5; return 0; }
 static NTSTATUS xinput_call( void *args ) { last = 6; return 0; }
 static NTSTATUS dns_call( void *args ) { last = 7; return 0; }
 static NTSTATUS wma_call( void *args ) { last = 8; return 0; }
+static NTSTATUS dwrite_call( void *args ) { last = 9; return 0; }
+const unixlib_entry_t wine_nx_dwrite_wow64_unix_funcs[] = { dwrite_call };
+const unsigned int wine_nx_dwrite_wow64_unix_count = 1;
 static const unixlib_entry_t unix_call_wow64_funcs[] = { ntdll_call, ntdll_call };
 const unixlib_entry_t wine_nx_ws2_32_wow64_unix_funcs[5] = { ws2_call, ws2_call, ws2_call, ws2_call, ws2_call };
 const unixlib_entry_t wine_nx_opengl32_wow64_unix_funcs[3] = { gl_call, gl_call, gl_call };
@@ -124,6 +127,8 @@ int main(void)
     CHECK( wine_nx_call_ntdll_wow64( H(unix_call_wow64_funcs), 1, 7 ) == 7 && last == 1 );
     CHECK( wine_nx_call_ntdll_wow64( H(unix_call_wow64_funcs), 2, 7 ) == STATUS_INVALID_PARAMETER );
     last = 0;
+    CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_dwrite_wow64_unix_funcs), 0, 0 ) == 0 && last == 9 );
+    CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_dwrite_wow64_unix_funcs), 1, 0 ) == STATUS_INVALID_PARAMETER );
     CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_opengl32_wow64_unix_funcs), 0, 0x1000 ) == 0 && last == 3 );
     CHECK( wine_nx_call_ntdll_wow64( H(wine_nx_ws2_32_wow64_unix_funcs), 4, 9 ) == 9 && last == 2 );
     last = 0;
